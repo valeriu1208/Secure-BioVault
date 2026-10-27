@@ -1,0 +1,86 @@
+-- Database Initialization
+
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+-- Clean exisitng tables
+DROP TABLE IF EXISTS access_logs CASCADE;
+DROP TABLE IF EXISTS consents CASCADE;
+DROP TABLE IF EXISTS files CASCADE;
+DROP TABLE IF EXISTS patient_profiles CASCADE;
+DROP TABLE IF EXISTS credentials CASCADE;
+DROP TABLE IF EXISTS users CASCADE;
+DROP TABLE IF EXISTS roles CASCADE;
+
+
+-- Create tables
+CREATE TABLE roles (
+    role_id SERIAL PRIMARY KEY,
+    role_name VARCHAR(50) UNIQUE NOT NULL
+);
+
+INSERT INTO roles (role_name) VALUES
+('PATIENT'),
+('DOCTOR'),
+('ADMIN'),
+('RESEARCHER');
+
+CREATE TABLE users (
+    user_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    email VARCHAR(255) UNIQUE NOT NULL,
+    role_id INT NOT NULL REFERENCES roles(role_id) ON DELETE RESTRICT,
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE credentials (
+    user_id UUID PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+    password_hash VARCHAR(255) NOT NULL,
+    last_password_change TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE patient_profiles (
+    profile_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID UNIQUE NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    encrypted_first_name TEXT NOT NULL,
+    encrypted_last_name TEXT NOT NULL,
+    encrypted_dni TEXT NOT NULL,
+    encrypted_ssn TEXT,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Consents for ABAC/OPA
+CREATE TABLE consents (
+    consent_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    patient_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    granted_to_user_id UUID REFERENCES users(user_id) ON DELETE CASCADE,
+    granted_to_role VARCHAR(50),
+    allowed_purpose VARCHAR(100) NOT NULL,
+    is_granted BOOLEAN DEFAULT TRUE,
+    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Files using Envelope Encryption AES-256-GCM
+CREATE TABLE files (
+    file_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    owner_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    original_filename VARCHAR(255) NOT NULL,
+    file_type VARCHAR(50) NOT NULL,              -- 'VCF', 'FASTA', 'PDF', 'JSON'
+    sensitivity_category VARCHAR(50) DEFAULT 'HIGHLY_CONFIDENTIAL',
+    storage_path VARCHAR(512) NOT NULL,          -- Local path in the app
+    encrypted_dek TEXT NOT NULL,                 -- DEK encrypted with KEK
+    iv_nonce TEXT NOT NULL,                      -- Initialization vector AES-GCM
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE access_logs (
+    log_id BIGSERIAL PRIMARY KEY,
+    user_id UUID REFERENCES users(user_id) ON DELETE SET NULL,
+    action VARCHAR(100) NOT NULL,                -- 'FILE_READ', 'LOGIN_ATTEMPT'
+    resource_id UUID,
+    decision VARCHAR(20) NOT NULL,               -- 'ALLOWED' or 'DENIED'
+    reason VARCHAR(255),
+    ip_address VARCHAR(45),
+    timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
