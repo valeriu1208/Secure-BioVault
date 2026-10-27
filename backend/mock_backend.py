@@ -22,6 +22,9 @@ USERS: dict[str, dict] = {}   # username -> {email, password}
 TOKENS: dict[str, str] = {}   # token -> username
 FILES: dict[str, dict] = {}   # file_id -> {owner, filename, description, created_at, data}
 
+@app.get("/health")
+def health_check() -> dict[str, str]:
+    return {"status": "ok"}
 
 class RegisterIn(BaseModel):
     username: str
