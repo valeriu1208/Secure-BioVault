@@ -195,6 +195,9 @@ def vault_page():
  
     # --- Subida ---
     with tab_upload:
+        if st.session_state.pop("upload_success", False):
+            st.success("Documento cifrado y almacenado correctamente.")
+
         with st.form("upload_form", clear_on_submit=True):
             uploaded = st.file_uploader("Selecciona un PDF", type=["pdf"])
             description = st.text_input("Descripción (opcional)", max_chars=200)
@@ -211,7 +214,8 @@ def vault_page():
                 else:
                     try:
                         api.upload_file(session, uploaded.name, data, description)
-                        st.success("Documento cifrado y almacenado correctamente.")
+                        st.session_state["upload_success"] = True
+                        st.rerun()
                     except api.ApiError as exc:
                         handle_api_error(exc)
  
