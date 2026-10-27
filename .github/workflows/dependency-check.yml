@@ -44,22 +44,9 @@ jobs:
           pip freeze > ../extracted-deps/requirements-frontend.txt
           cd ..
 
-      # Step 2: Generate SARIF report for GitHub Security Tab
-      - name: Run Trivy Scan (SARIF)
+      # Step 2: Generate JSON report (exit-code 0 so file creation never crashes job)
+      - name: Generate Trivy JSON Report
         uses: aquasecurity/trivy-action@v0.35.0
-        with:
-          scan-type: 'fs'
-          scan-ref: '.'
-          scanners: 'vuln,secret'
-          format: 'sarif'
-          output: 'trivy-fs-results.sarif'
-          exit-code: '0'
-          severity: 'HIGH,CRITICAL'
-
-      # Step 3: Generate JSON report for downloadable artifact
-      - name: Run Trivy Scan (JSON)
-        uses: aquasecurity/trivy-action@v0.35.0
-        if: always()
         with:
           scan-type: 'fs'
           scan-ref: '.'
@@ -69,7 +56,7 @@ jobs:
           exit-code: '0'
           severity: 'HIGH,CRITICAL'
 
-      # Step 4: Save JSON report as downloadable artifact
+      # Step 3: ALWAYS save JSON report as artifact (even if future steps fail)
       - name: Save JSON Report Artifact
         uses: actions/upload-artifact@v4
         if: always()
@@ -78,7 +65,19 @@ jobs:
           path: trivy-fs-results.json
           retention-days: 7
 
-      # Step 5: Upload SARIF to GitHub Security Tab
+      # Step 4: Run Trivy Scan & FAIL the build on HIGH/CRITICAL (exit-code 1)
+      - name: Evaluate Security Policy (Fail on HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          scanners: 'vuln,secret'
+          format: 'sarif'
+          output: 'trivy-fs-results.sarif'
+          exit-code: '1' 
+          severity: 'HIGH,CRITICAL'
+
+      # Step 5: Upload SARIF to Security Tab (Runs even if Step 4 failed)
       - name: Upload SARIF to Security Tab
         uses: github/codeql-action/upload-sarif@v4
         if: always()
