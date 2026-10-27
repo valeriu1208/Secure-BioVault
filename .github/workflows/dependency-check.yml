@@ -54,6 +54,14 @@ jobs:
           severity: 'HIGH,CRITICAL'
           # Force Trivy to parse the newly generated freeze files
           trivy-ignores: ''
+      - name: Save SARIF file as downloadable artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-scan-report
+          path: trivy-fs-results.sarif
+          retention-days: 7
+
 
       - name: Upload SARIF to Security Tab
         uses: github/codeql-action/upload-sarif@v4
