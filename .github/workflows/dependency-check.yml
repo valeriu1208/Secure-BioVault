@@ -5,11 +5,16 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
-
+permissions:
+  contents: read
+  security-events: write
 jobs:
   python-sca:
     name: Extract & Scan Python Dependencies
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -51,7 +56,7 @@ jobs:
           trivy-ignores: ''
 
       - name: Upload SARIF to Security Tab
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         if: always()
         with:
           sarif_file: 'trivy-fs-results.sarif'
