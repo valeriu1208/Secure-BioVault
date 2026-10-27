@@ -1,0 +1,58 @@
+name: Trivy Security Scan
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  python-sca:
+    name: Extract & Scan Python Dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Step 1: Install dependencies and export explicit lockfiles
+      - name: Generate Pinned Freeze Files
+        run: |
+          mkdir -p extracted-deps
+          
+          # Backend freeze
+          cd backend
+          pip install -r requirements.txt || true
+          pip freeze > ../extracted-deps/requirements-backend.txt
+          cd ..
+          
+          # Frontend freeze
+          cd frontend
+          pip install -r requirements.txt || true
+          pip freeze > ../extracted-deps/requirements-frontend.txt
+          cd ..
+
+      # Step 2: Scan the extracted freeze files with Trivy
+      - name: Run Trivy Scan on Frozen Dependencies
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          scanners: 'vuln,secret'
+          format: 'sarif'
+          output: 'trivy-fs-results.sarif'
+          exit-code: '0'
+          severity: 'HIGH,CRITICAL'
+          # Force Trivy to parse the newly generated freeze files
+          trivy-ignores: ''
+
+      - name: Upload SARIF to Security Tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-fs-results.sarif'
+          category: 'python-sca'
