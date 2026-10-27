@@ -5,9 +5,11 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+
 permissions:
   contents: read
   security-events: write
+
 jobs:
   python-sca:
     name: Extract & Scan Python Dependencies
@@ -15,6 +17,7 @@ jobs:
     permissions:
       contents: read
       security-events: write
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -41,8 +44,8 @@ jobs:
           pip freeze > ../extracted-deps/requirements-frontend.txt
           cd ..
 
-      # Step 2: Scan the extracted freeze files with Trivy
-      - name: Run Trivy Scan on Frozen Dependencies
+      # Step 2: Generate SARIF report for GitHub Security Tab
+      - name: Run Trivy Scan (SARIF)
         uses: aquasecurity/trivy-action@v0.35.0
         with:
           scan-type: 'fs'
@@ -52,17 +55,30 @@ jobs:
           output: 'trivy-fs-results.sarif'
           exit-code: '0'
           severity: 'HIGH,CRITICAL'
-          # Force Trivy to parse the newly generated freeze files
-          trivy-ignores: ''
-      - name: Save SARIF file as downloadable artifact
+
+      # Step 3: Generate JSON report for downloadable artifact
+      - name: Run Trivy Scan (JSON)
+        uses: aquasecurity/trivy-action@v0.35.0
+        if: always()
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          scanners: 'vuln,secret'
+          format: 'json'
+          output: 'trivy-fs-results.json'
+          exit-code: '0'
+          severity: 'HIGH,CRITICAL'
+
+      # Step 4: Save JSON report as downloadable artifact
+      - name: Save JSON Report Artifact
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: trivy-scan-report
-          path: trivy-fs-results.sarif
+          name: trivy-json-report
+          path: trivy-fs-results.json
           retention-days: 7
 
-
+      # Step 5: Upload SARIF to GitHub Security Tab
       - name: Upload SARIF to Security Tab
         uses: github/codeql-action/upload-sarif@v4
         if: always()
