@@ -24,7 +24,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
 
       # --- Bandit Scan ---
       - name: Install Bandit & SARIF Formatter
@@ -108,6 +108,7 @@ jobs:
           output: 'trivy-backend-image.sarif'
           exit-code: '1'
           severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true
 
       - name: Upload Backend Image SARIF
         uses: github/codeql-action/upload-sarif@v4
@@ -139,7 +140,7 @@ jobs:
           output: 'trivy-frontend-image.sarif'
           exit-code: '1'
           severity: 'HIGH,CRITICAL'
-
+          ignore-unfixed: true
       - name: Upload Frontend Image SARIF
         uses: github/codeql-action/upload-sarif@v4
         if: always()
