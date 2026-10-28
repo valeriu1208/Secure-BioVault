@@ -1,0 +1,157 @@
+name: Security Pipeline (SAST & Container Scanning)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  # ==========================================
+  # JOB 1: Static Application Security Testing
+  # ==========================================
+  sast-analysis:
+    name: SAST - Code Analysis (Bandit & Semgrep)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # --- Bandit Scan ---
+      - name: Install Bandit & SARIF Formatter
+        run: pip install bandit bandit-sarif-formatter
+
+      - name: Run Bandit (Python Security Linter)
+        run: |
+          bandit -r backend/ -f sarif -o bandit-results.sarif || true
+          bandit -r backend/ -f json -o bandit-results.json || true
+
+      - name: Save Bandit JSON Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bandit-sast-report
+          path: bandit-results.json
+          retention-days: 7
+
+      - name: Upload Bandit SARIF to Security Tab
+        uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        with:
+          sarif_file: 'bandit-results.sarif'
+          category: 'bandit-sast'
+
+      # --- Semgrep Scan ---
+      - name: Install Semgrep
+        run: python3 -m pip install semgrep
+
+      - name: Run Semgrep Scan
+        run: |
+          semgrep scan \
+            --config p/security-audit \
+            --config p/python \
+            --config p/owasp-top-10 \
+            --sarif -o semgrep-results.sarif
+        continue-on-error: true
+
+      - name: Upload Semgrep SARIF to Security Tab
+        uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        with:
+          sarif_file: 'semgrep-results.sarif'
+          category: 'semgrep-sast'
+
+  # ==========================================
+  # JOB 2: Docker Container Image Scanning
+  # ==========================================
+  container-scan:
+    name: Container Scanning - Docker Images
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # --- Build Images ---
+      - name: Build Backend Container Image
+        run: docker build -t backend-image:test ./backend
+
+      - name: Build Frontend Container Image
+        run: docker build -t frontend-image:test ./frontend
+
+      # --- Backend Container Scans ---
+      - name: Generate Backend Container JSON Report
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          scan-type: 'image'
+          image-ref: 'backend-image:test'
+          format: 'json'
+          output: 'trivy-backend-image.json'
+          exit-code: '0'
+          severity: 'HIGH,CRITICAL'
+
+      - name: Scan Backend Docker Image (SARIF)
+        uses: aquasecurity/trivy-action@v0.35.0
+        continue-on-error: true
+        with:
+          scan-type: 'image'
+          image-ref: 'backend-image:test'
+          format: 'sarif'
+          output: 'trivy-backend-image.sarif'
+          exit-code: '1'
+          severity: 'HIGH,CRITICAL'
+
+      - name: Upload Backend Image SARIF
+        uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        with:
+          sarif_file: 'trivy-backend-image.sarif'
+          category: 'container-backend'
+
+      # --- Frontend Container Scans ---
+      - name: Generate Frontend Container JSON Report
+        uses: aquasecurity/trivy-action@v0.35.0
+        if: always()
+        with:
+          scan-type: 'image'
+          image-ref: 'frontend-image:test'
+          format: 'json'
+          output: 'trivy-frontend-image.json'
+          exit-code: '0'
+          severity: 'HIGH,CRITICAL'
+
+      - name: Scan Frontend Docker Image (SARIF)
+        uses: aquasecurity/trivy-action@v0.35.0
+        continue-on-error: true
+        if: always()
+        with:
+          scan-type: 'image'
+          image-ref: 'frontend-image:test'
+          format: 'sarif'
+          output: 'trivy-frontend-image.sarif'
+          exit-code: '1'
+          severity: 'HIGH,CRITICAL'
+
+      - name: Upload Frontend Image SARIF
+        uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        with:
+          sarif_file: 'trivy-frontend-image.sarif'
+          category: 'container-frontend'
+
+      # --- Save Container JSON Artifacts ---
+      - name: Save Container Scan Artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: container-scan-json-reports
+          path: trivy-*-image.json
+          retention-days: 7
