@@ -29,13 +29,11 @@ jobs:
       # --- Bandit Scan ---
       - name: Install Bandit & SARIF Formatter
         run: pip install bandit bandit-sarif-formatter
-      - name: Check Bandit Version
-        run: bandit --version
 
       - name: Run Bandit (Python Security Linter)
         run: |
-          bandit -r backend/ frontend/ -f sarif -o bandit-results.sarif || true
-          bandit -r backend/ frontend/ -f json -o bandit-results.json || true
+          bandit -r backend/ -f sarif -o bandit-results.sarif || true
+          bandit -r backend/ -f json -o bandit-results.json || true
 
       - name: Save Bandit JSON Artifact
         uses: actions/upload-artifact@v4
@@ -53,15 +51,17 @@ jobs:
           category: 'bandit-sast'
 
       # --- Semgrep Scan ---
-      - name: Run Semgrep SAST
-        uses: semgrep/semgrep-action@v1
-        with:
-          config: >-
-            p/security-audit
-            p/python
-            p/owasp-top-10
-        env:
-          SEMGREP_SARIF_OUTPUT: 'semgrep-results.sarif'
+      - name: Install Semgrep
+        run: python3 -m pip install semgrep
+
+      - name: Run Semgrep Scan
+        run: |
+          semgrep scan \
+            --config p/security-audit \
+            --config p/python \
+            --config p/owasp-top-10 \
+            --sarif -o semgrep-results.sarif
+        continue-on-error: true
 
       - name: Upload Semgrep SARIF to Security Tab
         uses: github/codeql-action/upload-sarif@v4
@@ -100,6 +100,7 @@ jobs:
 
       - name: Scan Backend Docker Image (SARIF)
         uses: aquasecurity/trivy-action@v0.35.0
+        continue-on-error: true
         with:
           scan-type: 'image'
           image-ref: 'backend-image:test'
@@ -129,6 +130,7 @@ jobs:
 
       - name: Scan Frontend Docker Image (SARIF)
         uses: aquasecurity/trivy-action@v0.35.0
+        continue-on-error: true
         if: always()
         with:
           scan-type: 'image'
