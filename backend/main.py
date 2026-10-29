@@ -109,6 +109,8 @@ class RegisterIn(BaseModel):
     email: str = Field(min_length=3, max_length=255)
     password: str = Field(min_length=12, max_length=256)
 
+class RoleUpdateIn(BaseModel):
+    new_role: str = Field(pattern="^(PATIENT|DOCTOR|ADMIN|RESEARCHER)$")
 
 def get_db_connection(request: Request) -> Iterator[Connection[Any]]:
     pool: ConnectionPool = request.app.state.db_pool
@@ -360,7 +362,7 @@ def token(
 
 @app.get("/users/me")
 def me(user: dict[str, Any] = Depends(current_user)) -> dict[str, str]:
-    return {"username": user["username"], "email": user["email"]}
+    return {"username": user["username"], "email": user["email"], "role": user["role_name"]}
 
 
 @app.get("/files")
@@ -493,3 +495,118 @@ def delete_file(
     ).fetchone()
     if deleted is None:
         raise HTTPException(status_code=404, detail="Documento no encontrado")
+@app.post("/auth/logout", status_code=204)
+def logout(
+    request: Request,
+    token: str = Depends(oauth2),
+    connection: Connection[Any] = Depends(get_db_connection),
+) -> None:
+    try:
+        claims = jwt.decode(
+            token,
+            request.app.state.jwt_public_key,
+            algorithms=["EdDSA"],
+            audience=JWT_AUDIENCE,
+            issuer=JWT_ISSUER,
+            options={"verify_exp": False, "require": ["jti"]}
+        )
+        token_hash = hashlib.sha256(claims["jti"].encode("utf-8")).hexdigest()
+        
+        connection.execute(
+            "DELETE FROM auth_sessions WHERE token_hash = %s", 
+            (token_hash,)
+        )
+    except jwt.InvalidTokenError:
+        pass  
+@app.get("/admin/users")
+def list_all_users(
+    user: dict[str, Any] = Depends(current_user),
+    connection: Connection[Any] = Depends(get_db_connection),
+) -> list[dict[str, Any]]:
+    if user["role_name"] != "ADMIN":
+        raise HTTPException(status_code=403, detail="Requiere privilegios de administrador")
+    
+    return connection.execute(
+        """
+        SELECT u.user_id, u.username, u.email, r.role_name, u.is_active
+        FROM users u
+        JOIN roles r ON u.role_id = r.role_id
+        ORDER BY u.created_at DESC
+        """
+    ).fetchall()
+@app.patch("/admin/users/{target_user_id}/role")
+def update_user_role(  target_user_id: uuid.UUID,
+    body: RoleUpdateIn,
+    user: dict[str, Any] = Depends(current_user),
+    connection: Connection[Any] = Depends(get_db_connection),
+) -> dict[str, str]:
+    if user["role_name"] != "ADMIN":
+        raise HTTPException(status_code=403, detail="Requiere privilegios de administrador")
+        
+    role_record = connection.execute(
+        "SELECT role_id FROM roles WHERE role_name = %s", 
+        (body.new_role,)
+    ).fetchone()
+    
+    if not role_record:
+        raise HTTPException(status_code=400, detail="Rol inválido")
+
+    updated = connection.execute(
+        "UPDATE users SET role_id = %s WHERE user_id = %s RETURNING user_id",
+        (role_record["role_id"], target_user_id)
+    ).fetchone()
+    
+    if not updated:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+        
+    return {"message": f"Rol actualizado a {body.new_role}"}
+# --- Doctor Endpoints ---
+
+@app.get("/doctor/patients")
+def search_patients(
+    query: str = "",
+    user: dict[str, Any] = Depends(current_user),
+    connection: Connection[Any] = Depends(get_db_connection),
+) -> list[dict[str, Any]]:
+    if user["role_name"] not in ("DOCTOR", "ADMIN"):
+        raise HTTPException(status_code=403, detail="Acceso denegado")
+
+    sql = """
+        SELECT u.user_id, u.username, u.email
+        FROM users u
+        JOIN roles r ON u.role_id = r.role_id
+        WHERE r.role_name = 'PATIENT'
+    """
+    params = []
+    if query:
+        sql += " AND (u.username ILIKE %s OR u.email ILIKE %s)"
+        params.extend([f"%{query}%", f"%{query}%"])
+    
+    return connection.execute(sql, params).fetchall()
+
+
+@app.get("/doctor/patients/{patient_id}/files")
+def list_patient_files_for_doctor(
+    patient_id: uuid.UUID,
+    request: Request,
+    user: dict[str, Any] = Depends(current_user),
+    connection: Connection[Any] = Depends(get_db_connection),
+) -> list[dict[str, Any]]:
+    if user["role_name"] != "ADMIN":
+        try:
+            authorize_file_access(request, user, "list", patient_id)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error("Error authorizing file access: %s", exc)
+            raise HTTPException(status_code=403, detail="No se pudo verificar el consentimiento del paciente")
+
+    return connection.execute(
+        """
+        SELECT file_id AS id, original_filename AS filename, description, created_at
+        FROM files
+        WHERE owner_id = %s
+        ORDER BY created_at DESC
+        """,
+        (patient_id,),
+    ).fetchall()

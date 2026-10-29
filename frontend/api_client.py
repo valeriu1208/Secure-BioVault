@@ -74,16 +74,26 @@ def login(username: str, password: str) -> Session:
         "POST", "/auth/token", data={"username": username, "password": password}
     )
     return Session(access_token=resp.json()["access_token"])
+def logout(session: Session) -> None:
+    return _request("POST", "/auth/logout", session)
 
 
 def me(session: Session) -> dict:
     return _request("GET", "/users/me", session).json()
 
-
+def list_all_users(session: Session) -> list[dict]:
+    return _request("GET", "/admin/users", session).json()
 # ---------- Ficheros cifrados (bio-datos / PDFs) ----------
 def list_files(session: Session) -> list[dict]:
     return _request("GET", "/files", session).json()
 
+def update_user_role(session: Session, target_user_id: str, new_role: str) -> dict:
+    return _request(
+        "PATCH",
+        f"/admin/users/{target_user_id}/role",
+        session,
+        json={"new_role": new_role},
+    ).json()
 
 def upload_file(session: Session, name: str, content: bytes, description: str = ""):
     return _request(
@@ -101,3 +111,9 @@ def download_file(session: Session, file_id: str) -> bytes:
 
 def delete_file(session: Session, file_id: str) -> None:
     _request("DELETE", f"/files/{file_id}", session)
+
+def search_patients(session: Session, query: str = "") -> list[dict]:
+    return _request("GET", f"/doctor/patients?query={query}", session).json()
+
+def list_patient_files(session: Session, patient_id: str) -> list[dict]:
+    return _request("GET", f"/doctor/patients/{patient_id}/files", session).json()

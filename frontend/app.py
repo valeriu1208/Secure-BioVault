@@ -34,6 +34,12 @@ def is_pdf(data: bytes) -> bool:
  
  
 def logout():
+    session = st.session_state.get("session")
+    if session:
+        try:
+            api.logout(session)
+        except api.ApiError as exc:
+            st.warning(f"Error al cerrar sesión: {exc}")
     # El token vive solo en st.session_state (memoria del servidor de Streamlit)
     for key in ("session", "username"):
         st.session_state.pop(key, None)
@@ -67,8 +73,12 @@ def auth_page():
                 st.error("Introduce usuario y contraseña.")
             else:
                 try:
-                    st.session_state["session"] = api.login(username, password)
+                    token = api.login(username, password)
+                    st.session_state["session"] = token
                     st.session_state["username"] = username
+                    profile = api.me(token)
+                    st.session_state["role"] = profile.get("role", "PATIENT")
+
                     st.rerun()
                 except api.ApiError as exc:
                     st.error(
@@ -99,129 +109,224 @@ def auth_page():
                 except api.ApiError as exc:
                     st.error(str(exc))
  
- 
 # ---------- Pantalla principal ----------
-def vault_page():
+def vault_page(embedded: bool = False, key_prefix: str = "vault"):
     session = st.session_state["session"]
- 
+
+    if not embedded:
+        with st.sidebar:
+            st.markdown(f"### 👤 {st.session_state.get('username', '')}")
+            if st.button("Cerrar sesión", use_container_width=True, key=f"{key_prefix}_logout"):
+                logout()
+
+    st.title("🔐 Bóveda de Documentos")
+
+    # File upload section
+    with st.expander("📤 Subir nuevo documento cifrado"):
+        uploaded_file = st.file_uploader(
+            "Seleccionar archivo PDF", 
+            type=["pdf"], 
+            key=f"{key_prefix}_file_uploader"
+        )
+        description = st.text_input(
+            "Descripción (opcional)", 
+            key=f"{key_prefix}_file_desc"
+        )
+        if st.button("Subir y cifrar", key=f"{key_prefix}_btn_upload"):
+            if uploaded_file:
+                try:
+                    content = uploaded_file.read()
+                    api.upload_file(session, uploaded_file.name, content, description)
+                    st.success("Archivo subido y cifrado correctamente.")
+                    st.rerun()
+                except api.ApiError as exc:
+                    handle_api_error(exc)
+            else:
+                st.warning("Selecciona un archivo primero.")
+
+    # File list section
+    st.subheader("📋 Tus documentos")
+    try:
+        files = api.list_files(session)
+        if not files:
+            st.info("No tienes documentos guardados.")
+        else:
+            for f in files:
+                fid = str(f.get("file_id") or f.get("id"))
+                with st.container(border=True):
+                    col1, col2, col3 = st.columns([4, 2, 2])
+                    col1.markdown(f"**{f.get('filename', fid)}**")
+                    if f.get("description"):
+                        col1.caption(f["description"])
+
+                    # Prepare / Download button
+                    if col2.button("Preparar", key=f"{key_prefix}_prep_{fid}"):
+                        try:
+                            st.session_state[f"file_data_{fid}"] = api.download_file(session, fid)
+                        except api.ApiError as exc:
+                            handle_api_error(exc)
+
+                    if f"file_data_{fid}" in st.session_state:
+                        col2.download_button(
+                            "⬇️ Descargar",
+                            data=st.session_state[f"file_data_{fid}"],
+                            file_name=f.get("original_filename", f"{fid}.pdf"),
+                            mime="application/pdf",
+                            key=f"{key_prefix}_dl_{fid}",
+                        )
+
+                    # Delete button
+                    if col3.button("Eliminar", key=f"{key_prefix}_del_{fid}", type="secondary"):
+                        try:
+                            api.delete_file(session, fid)
+                            st.success("Eliminado")
+                            st.rerun()
+                        except api.ApiError as exc:
+                            handle_api_error(exc)
+
+    except api.ApiError as exc:
+        handle_api_error(exc)
+
+# ---------- Vista de Médico ----------
+def doctor_view(key_prefix: str = "doc"):
+    session = st.session_state["session"]
+    st.title("👨‍⚕️ Panel Médico")
+    st.caption("Consulta de expedientes de pacientes con consentimiento activo")
+
+    # Added key_prefix to search input
+    search_query = st.text_input(
+        "🔍 Buscar paciente", 
+        placeholder="Nombre de usuario o email...",
+        key=f"{key_prefix}_search_input"
+    )
+    
+    try:
+        patients = api.search_patients(session, search_query)
+    except api.ApiError as exc:
+        handle_api_error(exc)
+        patients = []
+
+    if not patients:
+        st.info("No se encontraron pacientes con consentimiento activo.")
+        return
+
+    # Added key_prefix to selectbox
+    selected_patient = st.selectbox(
+        "Seleccionar paciente:",
+        options=patients,
+        format_func=lambda p: f"{p['username']} ({p['email']})",
+        key=f"{key_prefix}_select_patient"
+    )
+
+    if selected_patient:
+        patient_id = selected_patient["user_id"]
+        st.subheader(f"📄 Expedientes de {selected_patient['username']}")
+        
+        try:
+            files = api.list_patient_files(session, patient_id)
+            if not files:
+                st.info("Este paciente no tiene documentos o el consentimiento ha expirado.")
+            else:
+                for f in files:
+                    fid = str(f.get("id"))
+                    with st.container(border=True):
+                        col_info, col_dl = st.columns([5, 2])
+                        col_info.markdown(f"**{f.get('filename', fid)}**")
+                        if f.get("description"):
+                            col_info.caption(f["description"])
+                        
+                        # Added key_prefix to buttons
+                        if col_dl.button("Preparar descarga", key=f"{key_prefix}_prep_{fid}"):
+                            try:
+                                st.session_state[f"doc_data_{fid}"] = api.download_file(session, fid)
+                            except api.ApiError as exc:
+                                handle_api_error(exc)
+                        
+                        if f"doc_data_{fid}" in st.session_state:
+                            col_dl.download_button(
+                                "⬇️ Descargar",
+                                data=st.session_state[f"doc_data_{fid}"],
+                                file_name=f.get("filename", f"{fid}.pdf"),
+                                mime="application/pdf",
+                                key=f"{key_prefix}_dl_{fid}",
+                            )
+        except api.ApiError as exc:
+            handle_api_error(exc)
+
+
+
+# ---------- Vista de Admin (con Pestañas para todo) ----------
+def admin_page():
+    session = st.session_state["session"]
+
     with st.sidebar:
-        st.markdown(f"### 👤 {st.session_state.get('username', '')}")
+        st.markdown(f"### 🛡️ {st.session_state.get('username', '')} (Admin)")
         if st.button("Cerrar sesión", use_container_width=True):
             logout()
         st.divider()
         st.caption(f"Backend: `{api.BACKEND_URL}`")
- 
-    st.title("🔐 Mi bóveda")
- 
-    tab_files, tab_upload = st.tabs(["📄 Mis documentos", "⬆️ Subir PDF"])
- 
-    # --- Listado ---
-    with tab_files:
+
+    # Tabs allowing Admin to switch between User Management and pre-viewing other roles
+    tab_users, tab_doctor_view, tab_patient_view = st.tabs([
+        "👥 Gestión de Usuarios", 
+        "👨‍⚕️ Vista Médico", 
+        "🔐 Vista Bóveda Paciente"
+    ])
+
+    # Tab 1: User Management
+    with tab_users:
+        st.title("🛡️ Gestión de Roles y Usuarios")
         try:
-            files = api.list_files(session)
+            users = api.list_all_users(session)
+            for u in users:
+                with st.container(border=True):
+                    col1, col2, col3 = st.columns([3, 2, 2])
+                    col1.markdown(f"**{u['username']}** ({u['email']})")
+                    col2.write(f"Rol: `{u['role_name']}`")
+                    
+                    roles = ["PATIENT", "DOCTOR", "ADMIN", "RESEARCHER"]
+                    current_idx = roles.index(u['role_name']) if u['role_name'] in roles else 0
+                    
+                    new_role = col3.selectbox(
+                        "Cambiar rol", 
+                        options=roles, 
+                        index=current_idx,
+                        key=f"role_{u['user_id']}"
+                    )
+                    
+                    if new_role != u['role_name']:
+                        if col3.button("Guardar", key=f"btn_{u['user_id']}"):
+                            try:
+                                api.update_user_role(session, u['user_id'], new_role)
+                                st.success(f"Rol cambiado a {new_role}")
+                                st.rerun()
+                            except api.ApiError as exc:
+                                handle_api_error(exc)
         except api.ApiError as exc:
             handle_api_error(exc)
-            files = []
- 
-        # Buscador: filtra por nombre o descripción (sin distinguir mayúsculas)
-        col_search, col_sort = st.columns([3, 2])
-        query = col_search.text_input(
-            "Buscar",
-            placeholder="🔍 Buscar por nombre o descripción…",
-            label_visibility="collapsed",
-        ).strip().lower()
-        sort_by = col_sort.selectbox(
-            "Ordenar",
-            ["Más recientes", "Más antiguos", "Nombre (A-Z)"],
-            label_visibility="collapsed",
-        )
- 
-        if query:
-            files = [
-                f
-                for f in files
-                if query in str(f.get("filename", "")).lower()
-                or query in str(f.get("description", "")).lower()
-            ]
-        if sort_by == "Nombre (A-Z)":
-            files = sorted(files, key=lambda f: str(f.get("filename", "")).lower())
-        else:
-            files = sorted(
-                files,
-                key=lambda f: str(f.get("created_at", "")),
-                reverse=(sort_by == "Más recientes"),
-            )
- 
-        if not files:
-            st.info(
-                f"Ningún documento coincide con «{query}»."
-                if query
-                else "Todavía no has subido ningún documento."
-            )
-        else:
-            st.caption(f"{len(files)} documento(s)")
-        for f in files:
-            fid = str(f.get("id"))
-            with st.container(border=True):
-                col_info, col_dl, col_del = st.columns([5, 2, 1])
-                col_info.markdown(f"**{f.get('filename', fid)}**")
-                if f.get("description"):
-                    col_info.caption(f["description"])
-                if f.get("created_at"):
-                    col_info.caption(f"Subido: {f['created_at']}")
- 
-                # El PDF se descifra en el backend solo al pulsar "Descargar"
-                if col_dl.button("Preparar descarga", key=f"prep_{fid}"):
-                    try:
-                        st.session_state[f"data_{fid}"] = api.download_file(session, fid)
-                    except api.ApiError as exc:
-                        handle_api_error(exc)
-                if f"data_{fid}" in st.session_state:
-                    col_dl.download_button(
-                        "⬇️ Descargar",
-                        data=st.session_state[f"data_{fid}"],
-                        file_name=f.get("filename", f"{fid}.pdf"),
-                        mime="application/pdf",
-                        key=f"dl_{fid}",
-                    )
- 
-                if col_del.button("🗑️", key=f"del_{fid}", help="Eliminar"):
-                    try:
-                        api.delete_file(session, fid)
-                        st.session_state.pop(f"data_{fid}", None)
-                        st.rerun()
-                    except api.ApiError as exc:
-                        handle_api_error(exc)
- 
-    # --- Subida ---
-    with tab_upload:
-        if st.session_state.pop("upload_success", False):
-            st.success("Documento cifrado y almacenado correctamente.")
 
-        with st.form("upload_form", clear_on_submit=True):
-            uploaded = st.file_uploader("Selecciona un PDF", type=["pdf"])
-            description = st.text_input("Descripción (opcional)", max_chars=200)
-            submitted = st.form_submit_button("Cifrar y subir", type="primary")
-        if submitted:
-            if uploaded is None:
-                st.error("Selecciona un fichero.")
-            else:
-                data = uploaded.getvalue()
-                if len(data) > MAX_PDF_MB * 1024 * 1024:
-                    st.error(f"El fichero supera {MAX_PDF_MB} MB.")
-                elif not is_pdf(data):
-                    st.error("El fichero no parece un PDF válido.")
-                else:
-                    try:
-                        api.upload_file(session, uploaded.name, data, description)
-                        st.session_state["upload_success"] = True
-                        st.rerun()
-                    except api.ApiError as exc:
-                        handle_api_error(exc)
- 
- 
+    # Tab 2: Embedded Doctor View
+    with tab_doctor_view:
+        doctor_view(key_prefix="admin_tab_doc")  # Use a different key prefix to avoid conflicts
+
+    # Tab 3: Embedded Patient Vault View
+    with tab_patient_view:
+        vault_page(embedded=True, key_prefix="admin_tab_patient")  # Use a different key prefix to avoid conflicts
+
+
 # ---------- Router ----------
 if "session" in st.session_state:
-    vault_page()
+    role = st.session_state.get("role", "PATIENT")
+    
+    if role == "ADMIN":
+        admin_page()
+    elif role == "DOCTOR":
+        with st.sidebar:
+            st.markdown(f"### 👨‍⚕️ {st.session_state.get('username', '')}")
+            if st.button("Cerrar sesión", use_container_width=True):
+                logout()
+        doctor_view()
+    else:
+        vault_page()
 else:
     auth_page()
