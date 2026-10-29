@@ -1,3 +1,5 @@
 extracted-deps/
 *.sarif
 *.json
+.env
+/secrets/

@@ -1,0 +1,21 @@
+ALTER TABLE users ADD COLUMN IF NOT EXISTS username VARCHAR(100);
+
+UPDATE users
+SET username = 'user_' || user_id::text
+WHERE username IS NULL;
+
+ALTER TABLE users ALTER COLUMN username SET NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS users_username_uq ON users(username);
+
+ALTER TABLE files ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
+ALTER TABLE files ADD COLUMN IF NOT EXISTS content BYTEA;
+ALTER TABLE files ALTER COLUMN storage_path DROP NOT NULL;
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+    token_hash CHAR(64) PRIMARY KEY,
+    user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS auth_sessions_user_id_idx ON auth_sessions(user_id);
