@@ -8,6 +8,7 @@ DROP TABLE IF EXISTS access_logs CASCADE;
 DROP TABLE IF EXISTS consents CASCADE;
 DROP TABLE IF EXISTS files CASCADE;
 DROP TABLE IF EXISTS patient_profiles CASCADE;
+DROP TABLE IF EXISTS auth_sessions CASCADE;
 DROP TABLE IF EXISTS credentials CASCADE;
 DROP TABLE IF EXISTS users CASCADE;
 DROP TABLE IF EXISTS roles CASCADE;
@@ -27,11 +28,14 @@ INSERT INTO roles (role_name) VALUES
 
 CREATE TABLE users (
     user_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    username VARCHAR(100) NOT NULL,
     email VARCHAR(255) UNIQUE NOT NULL,
     role_id INT NOT NULL REFERENCES roles(role_id) ON DELETE RESTRICT,
     is_active BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE UNIQUE INDEX users_username_uq ON users(username);
 
 CREATE TABLE credentials (
     user_id UUID PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
@@ -66,13 +70,24 @@ CREATE TABLE files (
     file_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     owner_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
     original_filename VARCHAR(255) NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
     file_type VARCHAR(50) NOT NULL,              -- 'VCF', 'FASTA', 'PDF', 'JSON'
     sensitivity_category VARCHAR(50) DEFAULT 'HIGHLY_CONFIDENTIAL',
-    storage_path VARCHAR(512) NOT NULL,          -- Local path in the app
-    encrypted_dek TEXT NOT NULL,                 -- DEK encrypted with KEK
-    iv_nonce TEXT NOT NULL,                      -- Initialization vector AES-GCM
+    storage_path VARCHAR(512),                   -- Null when the encrypted content is stored in this row
+    encrypted_dek TEXT NOT NULL,                 -- Wrapped per-file key, including its wrapping nonce
+    iv_nonce TEXT NOT NULL,                      -- AES-GCM nonce for the encrypted content
+    content BYTEA,                               -- Encrypted PDF bytes
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE auth_sessions (
+    token_hash CHAR(64) PRIMARY KEY,
+    user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX auth_sessions_user_id_idx ON auth_sessions(user_id);
 
 CREATE TABLE access_logs (
     log_id BIGSERIAL PRIMARY KEY,
