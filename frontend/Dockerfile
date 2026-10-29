@@ -4,7 +4,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 WORKDIR /app
-
+RUN pip install --no-cache-dir pip==26.1.2
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

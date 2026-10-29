@@ -99,3 +99,16 @@ CREATE TABLE access_logs (
     ip_address VARCHAR(45),
     timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+WITH new_admin AS(
+    INSERT INTO users (user_id, username, email, role_id, is_active) VALUES (
+        "8204e6b7-36d7-4d65-ab3f-9db8e789fa69", 
+        "admin",
+        "admin@securebiovault.com",
+        (SELECT role_id FROM roles WHERE role_name = 'ADMIN'),
+        TRUE
+    )
+    RETURNING user_id
+    )
+    INSERT INTO credential_store (user_id, password_hash) 
+        (SELECT user_id, '$argon2id$v=19$m=65536,t=3,p=4$yALj6jnDv/1woclUeB/L/g$J7S+N+Ioxij2q5sY46kQW4ha1Ro7MFkO2ergfJpDOFM' FROM new_admin
+)
