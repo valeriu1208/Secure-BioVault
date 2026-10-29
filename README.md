@@ -1,38 +1,71 @@
 # Secure BioVault
 
-Secure BioVault uses FastAPI for the backend API and Streamlit for the frontend.
+Secure BioVault uses FastAPI, Streamlit, and PostgreSQL.
 
 ## Run with Docker Compose
 
-To run the UI with the in-memory mock backend and the PostgreSQL database, run
-this from the repository root:
+Generate a database password and a 32-byte file-encryption key:
 
 ```sh
-docker compose -f compose.mock.yaml up --build
+python3 -c "import base64, secrets; print('POSTGRES_PASSWORD=' + secrets.token_hex(24)); print('FILE_ENCRYPTION_KEY=' + base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"
 ```
 
-Open the Streamlit frontend at <http://localhost:8501>. The mock API is also
-available at <http://localhost:8000>, and PostgreSQL is available locally on
-port 5432. Register a user in the UI, then sign in.
+Create a `.env` file in the repository root with these values, using the
+generated password and key:
 
-Stop the services with `Ctrl+C`, or run `docker compose -f compose.mock.yaml down`
-in another terminal. PostgreSQL data is kept in a named volume; remove it only
-when you intentionally want to erase the database with
-`docker compose -f compose.mock.yaml down -v`.
+```text
+POSTGRES_DB=biovault_db
+POSTGRES_USER=biovault_user
+POSTGRES_PASSWORD=paste-the-generated-password-here
+FILE_ENCRYPTION_KEY=paste-the-generated-key-here
+```
 
-The mock backend stores users and files in memory, loses them when stopped, and
-does not provide real authentication or encryption. It does not connect to
-PostgreSQL, so only database data persists. Do not use real passwords or
-sensitive documents with the mock. The regular `compose.yaml` starts the
-initial FastAPI backend and PostgreSQL database; the backend currently only
-implements health-check routes, so it is not yet integrated with the frontend's
-vault features.
+Keep this key secret and back it up securely. Files cannot be decrypted if the
+key is lost. Then start the app:
+
+```sh
+docker compose up --build
+```
+
+Open the frontend at <http://localhost:8501>. The API is at
+<http://localhost:8000>, with an OpenAPI page at <http://localhost:8000/docs>.
+The backend waits for PostgreSQL and applies the idempotent API schema migration
+before starting. Register an account in the UI, sign in, and upload PDFs.
+
+Stop the services with `Ctrl+C`, or run `docker compose down` in another
+terminal. PostgreSQL data persists in the `postgres_api_data` volume. This
+separate volume leaves any older `postgres_data` volume untouched. Do not use
+`docker compose down -v` unless you intentionally want to delete the new
+database data.
+
+Passwords are stored as Argon2 hashes. Session tokens are random bearer tokens
+whose hashes are stored in PostgreSQL. Uploaded PDFs are encrypted with
+AES-256-GCM using a per-file key; that key is wrapped by `FILE_ENCRYPTION_KEY`.
+
+## Mock backend
+
+For UI-only testing, run `docker compose -f compose.mock.yaml up --build`.
+The mock backend stores users and files in memory and does not provide real
+authentication, encryption, or PostgreSQL persistence. Do not use real
+passwords or sensitive documents with it.
 
 ## Run locally
 
-Start the API from `backend/`:
+For local development, start PostgreSQL with `docker compose up -d db`.
+Load the `.env` values into your shell and set the local database URL:
 
 ```sh
+set -a
+. ./.env
+set +a
+export DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5432/${POSTGRES_DB}"
+docker compose run --rm db-migrate
+```
+
+Then install dependencies and start the API from `backend/`:
+
+```sh
+cd backend
 python -m pip install -r requirements.txt
 uvicorn main:app --reload
 ```
@@ -45,4 +78,4 @@ streamlit run app.py
 ```
 
 When running locally, the frontend defaults to `http://localhost:8000` for the
-API. Set `API_BASE_URL` to override it.
+API. Set `BACKEND_URL` to override it.

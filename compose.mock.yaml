@@ -32,16 +32,16 @@ services:
     container_name: biovault_db
     restart: unless-stopped
     environment:
-      POSTGRES_DB: biovault_db
-      POSTGRES_USER: biovault_user
-      POSTGRES_PASSWORD: BioVault2026!
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U biovault_user -d biovault_db"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
