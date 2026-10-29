@@ -7,11 +7,17 @@ Secure BioVault uses FastAPI, Streamlit, and PostgreSQL.
 Generate a database password and a 32-byte file-encryption key:
 
 ```sh
-python3 -c "import base64, secrets; print('POSTGRES_PASSWORD=' + secrets.token_hex(24)); print('FILE_ENCRYPTION_KEY=' + base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"
+make key
 ```
+
+or
 
 Create a `.env` file in the repository root with these values, using the
 generated password and key:
+
+```sh
+python3 -c "import base64, secrets; print('POSTGRES_PASSWORD=' + secrets.token_hex(24)); print('FILE_ENCRYPTION_KEY=' + base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"
+```
 
 ```text
 POSTGRES_DB=biovault_db
