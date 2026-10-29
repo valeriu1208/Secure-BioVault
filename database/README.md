@@ -15,13 +15,13 @@ urity
 
 The database design incorporates privacy, security, and access control features required by the project:
 
-1. **`roles`**: Defines system roles (`PATIENT`, `DOCTOR`, `ADMIN`, `RESEARCHER`).
-2. **`users`**: Core user accounts table storing user UUIDs, emails, roles, and status flags.
-3. **`user_credentials`**: Isolated 1:1 table storing Argon2id password hashes for security separation.
-4. **`patient_profiles`**: Stores Personally Identifiable Information (PII) encrypted at rest (Field-Level Encryption / FLE).
-5. **`consents`**: Captures patient permissions, allowed scopes, and expiration dates for evaluation by the Open Policy Agent (OPA / ABAC) engine.
-6. **`biomedical_files`**: Stores file metadata and Envelope Encryption fields (encrypted DEK and AES-GCM IV/nonce).
-7. **`access_logs`**: Audit trail capturing user access requests, OPA decisions (`ALLOWED`/`DENIED`), and timestamps.
+1. **`roles`** and **`users`**: Define user roles, identities, and active status.
+2. **`credentials`**: Stores Argon2id password hashes separately from user records.
+3. **`patient_profiles`**: Holds encrypted PII fields.
+4. **`consents`**: Stores consent attributes for future policy rules. The initial Rego policy currently grants file access only to the owner.
+5. **`files`**: Stores file metadata, AES-GCM ciphertext, wrapped per-file data keys, and nonces.
+6. **`auth_sessions`**: Stores hashes of JWT IDs and their expiration times.
+7. **`access_logs`**: Schema for access decisions and audit events.
 
 ### Database Commands (`Makefile`)
 

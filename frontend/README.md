@@ -37,6 +37,7 @@ BACKEND_URL=https://mi-backend:8000 streamlit run app.py
 |---|---|---|
 | POST | `/auth/register` | JSON `{username, email, password}` |
 | POST | `/auth/token` | OAuth2 password form → `{access_token}` (JWT) |
+| GET | `/.well-known/jwks.json` | Public Ed25519 signing key for JWT verification |
 | GET | `/users/me` | Datos del usuario |
 | GET | `/files` | Lista `[{id, filename, description, created_at}]` |
 | POST | `/files` | Multipart `file` + `description` |

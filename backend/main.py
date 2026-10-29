@@ -1,6 +1,7 @@
 import base64
 import binascii
 import hashlib
+import json
 import logging
 import os
 import secrets
@@ -8,9 +9,22 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
+from urllib.error import URLError
+from urllib.request import Request as URLRequest, urlopen
 
+import jwt
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+    Ed25519PrivateKey,
+    Ed25519PublicKey,
+)
+from cryptography.hazmat.primitives.serialization import (
+    Encoding,
+    PublicFormat,
+    load_pem_private_key,
+    load_pem_public_key,
+)
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -26,6 +40,10 @@ password_hash = PasswordHash.recommended()
 oauth2 = OAuth2PasswordBearer(tokenUrl="/auth/token")
 MAX_FILE_SIZE = 25 * 1024 * 1024
 SESSION_LIFETIME = timedelta(hours=12)
+JWT_ISSUER = "secure-biovault"
+JWT_AUDIENCE = "secure-biovault-api"
+JWT_KEY_ID = "ed25519-v1"
+OPA_DECISION_PATH = "/v1/data/biovault/authz/allow"
 
 
 def load_encryption_key() -> bytes:
@@ -41,6 +59,29 @@ def load_encryption_key() -> bytes:
     return key
 
 
+def load_jwt_keys() -> tuple[Ed25519PrivateKey, Ed25519PublicKey]:
+    private_path = os.environ.get("JWT_PRIVATE_KEY_PATH")
+    public_path = os.environ.get("JWT_PUBLIC_KEY_PATH")
+    if not private_path or not public_path:
+        raise RuntimeError("JWT_PRIVATE_KEY_PATH and JWT_PUBLIC_KEY_PATH must be set")
+
+    try:
+        with open(private_path, "rb") as private_file:
+            private_key = load_pem_private_key(private_file.read(), password=None)
+        with open(public_path, "rb") as public_file:
+            public_key = load_pem_public_key(public_file.read())
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("Unable to load JWT signing keys") from exc
+
+    if not isinstance(private_key, Ed25519PrivateKey) or not isinstance(
+        public_key, Ed25519PublicKey
+    ):
+        raise RuntimeError("JWT signing keys must use Ed25519")
+    if private_key.public_key().public_bytes_raw() != public_key.public_bytes_raw():
+        raise RuntimeError("JWT signing and verification keys do not match")
+    return private_key, public_key
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     database_url = os.environ.get("DATABASE_URL")
@@ -48,6 +89,8 @@ async def lifespan(app: FastAPI):
         raise RuntimeError("DATABASE_URL must be set")
 
     app.state.file_encryption_key = load_encryption_key()
+    app.state.jwt_private_key, app.state.jwt_public_key = load_jwt_keys()
+    app.state.opa_url = os.environ.get("OPA_URL", "http://localhost:8181").rstrip("/")
     with ConnectionPool(
         conninfo=database_url,
         min_size=1,
@@ -74,24 +117,128 @@ def get_db_connection(request: Request) -> Iterator[Connection[Any]]:
 
 
 def current_user(
+    request: Request,
     token: str = Depends(oauth2),
     connection: Connection[Any] = Depends(get_db_connection),
 ) -> dict[str, Any]:
-    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    try:
+        claims = jwt.decode(
+            token,
+            request.app.state.jwt_public_key,
+            algorithms=["EdDSA"],
+            audience=JWT_AUDIENCE,
+            issuer=JWT_ISSUER,
+            options={"require": ["aud", "exp", "iat", "iss", "jti", "sub"]},
+        )
+        user_id = uuid.UUID(claims["sub"])
+        token_hash = hashlib.sha256(claims["jti"].encode("utf-8")).hexdigest()
+    except (jwt.InvalidTokenError, ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(status_code=401, detail="Token inválido o caducado") from exc
+
     user = connection.execute(
         """
-        SELECT u.user_id, u.username, u.email
+        SELECT u.user_id, u.username, u.email, r.role_name
         FROM auth_sessions AS s
         JOIN users AS u ON u.user_id = s.user_id
+        JOIN roles AS r ON r.role_id = u.role_id
         WHERE s.token_hash = %s
+          AND s.user_id = %s
           AND s.expires_at > CURRENT_TIMESTAMP
           AND u.is_active = TRUE
         """,
-        (token_hash,),
+        (token_hash, user_id),
     ).fetchone()
-    if user is None:
+    if user is None or user["user_id"] != user_id:
         raise HTTPException(status_code=401, detail="Token inválido o caducado")
     return user
+
+
+def issue_access_token(user_id: uuid.UUID, private_key: Ed25519PrivateKey) -> tuple[str, str]:
+    now = datetime.now(timezone.utc)
+    token_id = secrets.token_urlsafe(32)
+    claims = {
+        "sub": str(user_id),
+        "jti": token_id,
+        "iss": JWT_ISSUER,
+        "aud": JWT_AUDIENCE,
+        "iat": now,
+        "exp": now + SESSION_LIFETIME,
+    }
+    return (
+        jwt.encode(claims, private_key, algorithm="EdDSA", headers={"kid": JWT_KEY_ID}),
+        token_id,
+    )
+
+
+def parse_opa_decision(decision: Any) -> bool | None:
+    if not isinstance(decision, dict):
+        return None
+    result = decision.get("result")
+    if isinstance(result, bool):
+        return result
+    if isinstance(result, dict):
+        allow = result.get("allow")
+        if isinstance(allow, bool):
+            return allow
+    return None
+
+
+def public_jwk(public_key: Ed25519PublicKey) -> dict[str, str]:
+    public_key_bytes = public_key.public_bytes(Encoding.Raw, PublicFormat.Raw)
+    encoded_key = base64.urlsafe_b64encode(public_key_bytes).rstrip(b"=").decode("ascii")
+    return {
+        "kty": "OKP",
+        "crv": "Ed25519",
+        "x": encoded_key,
+        "use": "sig",
+        "alg": "EdDSA",
+        "kid": JWT_KEY_ID,
+    }
+
+
+def authorize_file_access(
+    request: Request,
+    user: dict[str, Any],
+    action: str,
+    owner_id: uuid.UUID,
+    *,
+    denial_status_code: int = 403,
+) -> None:
+    input_document = {
+        "input": {
+            "subject": {
+                "id": str(user["user_id"]),
+                "role": user["role_name"],
+            },
+            "action": action,
+            "resource": {
+                "type": "file",
+                "owner_id": str(owner_id),
+            },
+        }
+    }
+    opa_request = URLRequest(
+        f"{request.app.state.opa_url}{OPA_DECISION_PATH}",
+        data=json.dumps(input_document).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(opa_request, timeout=2) as response:
+            decision = json.loads(response.read())
+    except (URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+        logger.warning("OPA authorization request failed: %s", exc)
+        raise HTTPException(status_code=503, detail="Authorization service unavailable") from exc
+
+    allow = parse_opa_decision(decision)
+    if not isinstance(allow, bool):
+        logger.error("OPA returned an invalid authorization decision")
+        raise HTTPException(status_code=503, detail="Authorization service unavailable")
+    if not allow:
+        raise HTTPException(
+            status_code=denial_status_code,
+            detail="No autorizado para acceder a este documento",
+        )
 
 
 def encrypt_file(content: bytes, file_id: uuid.UUID, master_key: bytes) -> tuple[bytes, str, str]:
@@ -125,14 +272,27 @@ def read_root() -> dict[str, str]:
     return {"message": "Secure BioVault API is running"}
 
 
+@app.get("/.well-known/jwks.json")
+def jwks(request: Request) -> dict[str, list[dict[str, str]]]:
+    return {"keys": [public_jwk(request.app.state.jwt_public_key)]}
+
+
 @app.get("/health")
-def health_check(connection: Connection[Any] = Depends(get_db_connection)) -> dict[str, str]:
+def health_check(
+    request: Request,
+    connection: Connection[Any] = Depends(get_db_connection),
+) -> dict[str, str]:
     try:
         connection.execute("SELECT 1")
+        with urlopen(f"{request.app.state.opa_url}/health", timeout=2):
+            pass
     except (PsycopgError, PoolTimeout) as exc:
         logger.warning("Database health check failed: %s", exc)
         raise HTTPException(status_code=503, detail="Database unavailable") from exc
-    return {"status": "ok", "database": "ok"}
+    except (URLError, TimeoutError, OSError) as exc:
+        logger.warning("OPA health check failed: %s", exc)
+        raise HTTPException(status_code=503, detail="Authorization service unavailable") from exc
+    return {"status": "ok", "database": "ok", "authorization": "ok"}
 
 
 @app.post("/auth/register", status_code=201)
@@ -168,9 +328,10 @@ def register(
 
 @app.post("/auth/token")
 def token(
+    request: Request,
     form: OAuth2PasswordRequestForm = Depends(),
     connection: Connection[Any] = Depends(get_db_connection),
-) -> dict[str, str]:
+) -> dict[str, Any]:
     user = connection.execute(
         """
         SELECT u.user_id, c.password_hash
@@ -183,14 +344,18 @@ def token(
     if user is None or not password_hash.verify(form.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Credenciales incorrectas")
 
-    access_token = secrets.token_urlsafe(32)
-    token_hash = hashlib.sha256(access_token.encode("utf-8")).hexdigest()
+    access_token, token_id = issue_access_token(user["user_id"], request.app.state.jwt_private_key)
+    token_hash = hashlib.sha256(token_id.encode("utf-8")).hexdigest()
     expires_at = datetime.now(timezone.utc) + SESSION_LIFETIME
     connection.execute(
         "INSERT INTO auth_sessions (token_hash, user_id, expires_at) VALUES (%s, %s, %s)",
         (token_hash, user["user_id"], expires_at),
     )
-    return {"access_token": access_token, "token_type": "bearer"}
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "expires_in": int(SESSION_LIFETIME.total_seconds()),
+    }
 
 
 @app.get("/users/me")
@@ -200,9 +365,11 @@ def me(user: dict[str, Any] = Depends(current_user)) -> dict[str, str]:
 
 @app.get("/files")
 def list_files(
+    request: Request,
     user: dict[str, Any] = Depends(current_user),
     connection: Connection[Any] = Depends(get_db_connection),
 ) -> list[dict[str, Any]]:
+    authorize_file_access(request, user, "list", user["user_id"])
     return connection.execute(
         """
         SELECT file_id AS id, original_filename AS filename, description, created_at
@@ -222,6 +389,7 @@ async def upload(
     user: dict[str, Any] = Depends(current_user),
     connection: Connection[Any] = Depends(get_db_connection),
 ) -> dict[str, str]:
+    authorize_file_access(request, user, "create", user["user_id"])
     content = await file.read(MAX_FILE_SIZE + 1)
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(status_code=413, detail="El fichero supera 25 MB")
@@ -265,14 +433,21 @@ def download(
 ) -> Response:
     record = connection.execute(
         """
-        SELECT content, encrypted_dek, iv_nonce
+        SELECT owner_id, content, encrypted_dek, iv_nonce
         FROM files
-        WHERE file_id = %s AND owner_id = %s
+        WHERE file_id = %s
         """,
-        (file_id, user["user_id"]),
+        (file_id,),
     ).fetchone()
     if record is None:
         raise HTTPException(status_code=404, detail="Documento no encontrado")
+    authorize_file_access(
+        request,
+        user,
+        "read",
+        record["owner_id"],
+        denial_status_code=404,
+    )
     if record["content"] is None:
         raise HTTPException(
             status_code=410,
@@ -294,13 +469,27 @@ def download(
 
 @app.delete("/files/{file_id}", status_code=204)
 def delete_file(
+    request: Request,
     file_id: uuid.UUID,
     user: dict[str, Any] = Depends(current_user),
     connection: Connection[Any] = Depends(get_db_connection),
 ) -> None:
+    record = connection.execute(
+        "SELECT owner_id FROM files WHERE file_id = %s",
+        (file_id,),
+    ).fetchone()
+    if record is None:
+        raise HTTPException(status_code=404, detail="Documento no encontrado")
+    authorize_file_access(
+        request,
+        user,
+        "delete",
+        record["owner_id"],
+        denial_status_code=404,
+    )
     deleted = connection.execute(
         "DELETE FROM files WHERE file_id = %s AND owner_id = %s RETURNING file_id",
-        (file_id, user["user_id"]),
+        (file_id, record["owner_id"]),
     ).fetchone()
     if deleted is None:
         raise HTTPException(status_code=404, detail="Documento no encontrado")
