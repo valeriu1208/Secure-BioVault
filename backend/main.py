@@ -112,6 +112,12 @@ class RegisterIn(BaseModel):
 class RoleUpdateIn(BaseModel):
     new_role: str = Field(pattern="^(PATIENT|DOCTOR|ADMIN|RESEARCHER)$")
 
+class DeleteAccountIn(BaseModel):
+    password: str = Field(min_length=1)
+
+class UpdateUserActiveStatusIn(BaseModel):
+    is_active: bool
+
 def get_db_connection(request: Request) -> Iterator[Connection[Any]]:
     pool: ConnectionPool = request.app.state.db_pool
     with pool.connection() as connection:
@@ -203,9 +209,27 @@ def authorize_file_access(
     user: dict[str, Any],
     action: str,
     owner_id: uuid.UUID,
+    connection: Connection[Any], # DB connection to access permisions
     *,
     denial_status_code: int = 403,
 ) -> None:
+    allowed_users = []
+    allowed_roles = []
+    consents = connection.execute(
+        """
+        SELECT granted_to_user_id, granted_to_role
+        FROM consents
+        WHERE patient_id = %s AND is_granted = TRUE AND expires_at > CURRENT_TIMESTAMP
+        """,
+        (owner_id,)
+    ).fetchall()
+
+    for c in consents:
+        if c["granted_to_user_id"]:
+            allowed_users.append(str(c["granted_to_user_id"]))
+        if c["granted_to_role"]:
+            allowed_roles.append(c["granted_to_role"])
+
     input_document = {
         "input": {
             "subject": {
@@ -216,6 +240,8 @@ def authorize_file_access(
             "resource": {
                 "type": "file",
                 "owner_id": str(owner_id),
+                "allowed_users": allowed_users,
+                "allowed_roles": allowed_roles,
             },
         }
     }
@@ -371,7 +397,7 @@ def list_files(
     user: dict[str, Any] = Depends(current_user),
     connection: Connection[Any] = Depends(get_db_connection),
 ) -> list[dict[str, Any]]:
-    authorize_file_access(request, user, "list", user["user_id"])
+    authorize_file_access(request, user, "list", user["user_id"], connection)
     return connection.execute(
         """
         SELECT file_id AS id, original_filename AS filename, description, created_at
@@ -391,7 +417,7 @@ async def upload(
     user: dict[str, Any] = Depends(current_user),
     connection: Connection[Any] = Depends(get_db_connection),
 ) -> dict[str, str]:
-    authorize_file_access(request, user, "create", user["user_id"])
+    authorize_file_access(request, user, "create", user["user_id"], connection)
     content = await file.read(MAX_FILE_SIZE + 1)
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(status_code=413, detail="El fichero supera 25 MB")
@@ -448,6 +474,7 @@ def download(
         user,
         "read",
         record["owner_id"],
+        connection,
         denial_status_code=404,
     )
     if record["content"] is None:
@@ -487,6 +514,7 @@ def delete_file(
         user,
         "delete",
         record["owner_id"],
+        connection,
         denial_status_code=404,
     )
     deleted = connection.execute(
@@ -560,7 +588,7 @@ def update_user_role(  target_user_id: uuid.UUID,
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
         
     return {"message": f"Rol actualizado a {body.new_role}"}
-# --- Doctor Endpoints ---
+
 
 @app.get("/doctor/patients")
 def search_patients(
@@ -584,7 +612,6 @@ def search_patients(
     
     return connection.execute(sql, params).fetchall()
 
-
 @app.get("/doctor/patients/{patient_id}/files")
 def list_patient_files_for_doctor(
     patient_id: uuid.UUID,
@@ -594,7 +621,7 @@ def list_patient_files_for_doctor(
 ) -> list[dict[str, Any]]:
     if user["role_name"] != "ADMIN":
         try:
-            authorize_file_access(request, user, "list", patient_id)
+            authorize_file_access(request, user, "list", patient_id, connection)
         except HTTPException:
             raise
         except Exception as exc:
@@ -610,3 +637,61 @@ def list_patient_files_for_doctor(
         """,
         (patient_id,),
     ).fetchall()
+
+@app.delete("/users/me")
+def delete_user(
+    body: DeleteAccountIn,
+    user: dict[str, Any] = Depends(current_user),
+    connection: Connection[Any] = Depends(get_db_connection),
+)-> dict[str, str]:
+    user_id = user["user_id"]
+    record = connection.execute(
+        "SELECT password_hash FROM credentials WHERE user_id = %s",
+        (user_id,),
+    ).fetchone()
+    if record is None or not password_hash.verify(body.password, record["password_hash"]):
+        raise HTTPException(status_code=401, detail="Contraseña incorrecta")
+    with connection.transaction():
+        connection.execute("UPDATE users SET is_active = FALSE WHERE user_id = %s", (user_id,))
+        connection.execute("DELETE FROM auth_sessions WHERE user_id = %s", (user_id,))
+    return {"message": "Usuario desactivado correctamente"}
+
+    
+
+@app.delete("/admin/users/{target_user_id}")
+def delete_user_by_admin(
+    target_user_id: uuid.UUID,
+    user: dict[str, Any] = Depends(current_user),
+    connection: Connection[Any] = Depends(get_db_connection),
+)-> dict[str, str]:
+    if user["role_name"] != "ADMIN":
+        raise HTTPException(status_code=403, detail="Requiere privilegios de administrador")
+    
+    with connection.transaction():
+        target = connection.execute("SELECT user_id FROM users WHERE user_id = %s", (target_user_id,)).fetchone()
+        if not target:
+            raise HTTPException(status_code=404, detail="Usuario no encontrado")
+        connection.execute("UPDATE users SET is_active = FALSE WHERE user_id = %s", (target_user_id,))
+        connection.execute("DELETE FROM auth_sessions WHERE user_id = %s", (target_user_id,))
+
+    return {"message": "Usuario desactivado correctamente por el administrador"}
+
+@app.patch("/admin/users/{target_user_id}/active")
+def update_user_active_status(
+    target_user_id: uuid.UUID,
+    body: UpdateUserActiveStatusIn,
+    user: dict[str, Any] = Depends(current_user),
+    connection: Connection[Any] = Depends(get_db_connection),
+) -> dict[str, str]:
+    if user["role_name"] != "ADMIN":
+        raise HTTPException(status_code=403, detail="Requiere privilegios de administrador")
+
+    with connection.transaction():
+        target = connection.execute("SELECT user_id FROM users WHERE user_id = %s", (target_user_id,)).fetchone()
+        if not target:
+            raise HTTPException(status_code=404, detail="Usuario no encontrado")
+        connection.execute("UPDATE users SET is_active = %s WHERE user_id = %s", (body.is_active, target_user_id))
+        if not body.is_active:
+            connection.execute("DELETE FROM auth_sessions WHERE user_id = %s", (target_user_id,))
+
+    return {"message": "Estado de cuenta actualizado correctamente por el administrador"}

@@ -8,8 +8,7 @@ RUN pip install --no-cache-dir pip==26.1.2
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py .
-COPY api_client.py .
+COPY . .
 
 EXPOSE 8501
 

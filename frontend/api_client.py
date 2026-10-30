@@ -117,3 +117,15 @@ def search_patients(session: Session, query: str = "") -> list[dict]:
 
 def list_patient_files(session: Session, patient_id: str) -> list[dict]:
     return _request("GET", f"/doctor/patients/{patient_id}/files", session).json()
+
+def delete_my_account(session: Session, password: str) -> None:
+    return _request("DELETE", "/users/me", session, json={"password": password}).json()
+def delete_user(session: Session, target_user_id: str) -> None:
+    return _request("DELETE", f"/admin/users/{target_user_id}", session).json()
+def update_user_active_status(session: Session, target_user_id: str, is_active: bool) -> dict:
+    return _request(
+        "PATCH",
+        f"/admin/users/{target_user_id}/active",
+        session,
+        json={"is_active": is_active}
+    ).json()

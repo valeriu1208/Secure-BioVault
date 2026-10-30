@@ -3,3 +3,4 @@ extracted-deps/
 *.json
 .env
 /secrets/
+__pycache__/
