@@ -101,9 +101,9 @@ CREATE TABLE access_logs (
 );
 WITH new_admin AS(
     INSERT INTO users (user_id, username, email, role_id, is_active) VALUES (
-        "8204e6b7-36d7-4d65-ab3f-9db8e789fa69", 
-        "admin",
-        "admin@securebiovault.com",
+        '8204e6b7-36d7-4d65-ab3f-9db8e789fa69',
+        'admin',
+        'admin@securebiovault.com',
         (SELECT role_id FROM roles WHERE role_name = 'ADMIN'),
         TRUE
     )
