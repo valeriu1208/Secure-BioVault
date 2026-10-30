@@ -209,9 +209,27 @@ def authorize_file_access(
     user: dict[str, Any],
     action: str,
     owner_id: uuid.UUID,
+    connection: Connection[Any], # DB connection to access permisions
     *,
     denial_status_code: int = 403,
 ) -> None:
+    allowed_users = []
+    allowed_roles = []
+    consents = connection.execute(
+        """
+        SELECT granted_to_user_id, granted_to_role
+        FROM consents
+        WHERE patient_id = %s AND is_granted = TRUE AND expires_at > CURRENT_TIMESTAMP
+        """,
+        (owner_id,)
+    ).fetchall()
+
+    for c in consents:
+        if c["granted_to_user_id"]:
+            allowed_users.append(str(c["granted_to_user_id"]))
+        if c["granted_to_role"]:
+            allowed_roles.append(c["granted_to_role"])
+
     input_document = {
         "input": {
             "subject": {
@@ -222,6 +240,8 @@ def authorize_file_access(
             "resource": {
                 "type": "file",
                 "owner_id": str(owner_id),
+                "allowed_users": allowed_users,
+                "allowed_roles": allowed_roles,
             },
         }
     }
@@ -377,7 +397,7 @@ def list_files(
     user: dict[str, Any] = Depends(current_user),
     connection: Connection[Any] = Depends(get_db_connection),
 ) -> list[dict[str, Any]]:
-    authorize_file_access(request, user, "list", user["user_id"])
+    authorize_file_access(request, user, "list", user["user_id"], connection)
     return connection.execute(
         """
         SELECT file_id AS id, original_filename AS filename, description, created_at
@@ -397,7 +417,7 @@ async def upload(
     user: dict[str, Any] = Depends(current_user),
     connection: Connection[Any] = Depends(get_db_connection),
 ) -> dict[str, str]:
-    authorize_file_access(request, user, "create", user["user_id"])
+    authorize_file_access(request, user, "create", user["user_id"], connection)
     content = await file.read(MAX_FILE_SIZE + 1)
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(status_code=413, detail="El fichero supera 25 MB")
@@ -454,6 +474,7 @@ def download(
         user,
         "read",
         record["owner_id"],
+        connection,
         denial_status_code=404,
     )
     if record["content"] is None:
@@ -493,6 +514,7 @@ def delete_file(
         user,
         "delete",
         record["owner_id"],
+        connection,
         denial_status_code=404,
     )
     deleted = connection.execute(
@@ -599,7 +621,7 @@ def list_patient_files_for_doctor(
 ) -> list[dict[str, Any]]:
     if user["role_name"] != "ADMIN":
         try:
-            authorize_file_access(request, user, "list", patient_id)
+            authorize_file_access(request, user, "list", patient_id, connection)
         except HTTPException:
             raise
         except Exception as exc:
