@@ -112,6 +112,12 @@ class RegisterIn(BaseModel):
 class RoleUpdateIn(BaseModel):
     new_role: str = Field(pattern="^(PATIENT|DOCTOR|ADMIN|RESEARCHER)$")
 
+class DeleteAccountIn(BaseModel):
+    password: str = Field(min_length=1)
+
+class UpdateUserActiveStatusIn(BaseModel):
+    is_active: bool
+
 def get_db_connection(request: Request) -> Iterator[Connection[Any]]:
     pool: ConnectionPool = request.app.state.db_pool
     with pool.connection() as connection:
@@ -560,7 +566,7 @@ def update_user_role(  target_user_id: uuid.UUID,
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
         
     return {"message": f"Rol actualizado a {body.new_role}"}
-# --- Doctor Endpoints ---
+
 
 @app.get("/doctor/patients")
 def search_patients(
@@ -583,7 +589,6 @@ def search_patients(
         params.extend([f"%{query}%", f"%{query}%"])
     
     return connection.execute(sql, params).fetchall()
-
 
 @app.get("/doctor/patients/{patient_id}/files")
 def list_patient_files_for_doctor(
@@ -610,3 +615,61 @@ def list_patient_files_for_doctor(
         """,
         (patient_id,),
     ).fetchall()
+
+@app.delete("/users/me")
+def delete_user(
+    body: DeleteAccountIn,
+    user: dict[str, Any] = Depends(current_user),
+    connection: Connection[Any] = Depends(get_db_connection),
+)-> dict[str, str]:
+    user_id = user["user_id"]
+    record = connection.execute(
+        "SELECT password_hash FROM credentials WHERE user_id = %s",
+        (user_id,),
+    ).fetchone()
+    if record is None or not password_hash.verify(body.password, record["password_hash"]):
+        raise HTTPException(status_code=401, detail="Contraseña incorrecta")
+    with connection.transaction():
+        connection.execute("UPDATE users SET is_active = FALSE WHERE user_id = %s", (user_id,))
+        connection.execute("DELETE FROM auth_sessions WHERE user_id = %s", (user_id,))
+    return {"message": "Usuario desactivado correctamente"}
+
+    
+
+@app.delete("/admin/users/{target_user_id}")
+def delete_user_by_admin(
+    target_user_id: uuid.UUID,
+    user: dict[str, Any] = Depends(current_user),
+    connection: Connection[Any] = Depends(get_db_connection),
+)-> dict[str, str]:
+    if user["role_name"] != "ADMIN":
+        raise HTTPException(status_code=403, detail="Requiere privilegios de administrador")
+    
+    with connection.transaction():
+        target = connection.execute("SELECT user_id FROM users WHERE user_id = %s", (target_user_id,)).fetchone()
+        if not target:
+            raise HTTPException(status_code=404, detail="Usuario no encontrado")
+        connection.execute("UPDATE users SET is_active = FALSE WHERE user_id = %s", (target_user_id,))
+        connection.execute("DELETE FROM auth_sessions WHERE user_id = %s", (target_user_id,))
+
+    return {"message": "Usuario desactivado correctamente por el administrador"}
+
+@app.patch("/admin/users/{target_user_id}/active")
+def update_user_active_status(
+    target_user_id: uuid.UUID,
+    body: UpdateUserActiveStatusIn,
+    user: dict[str, Any] = Depends(current_user),
+    connection: Connection[Any] = Depends(get_db_connection),
+) -> dict[str, str]:
+    if user["role_name"] != "ADMIN":
+        raise HTTPException(status_code=403, detail="Requiere privilegios de administrador")
+
+    with connection.transaction():
+        target = connection.execute("SELECT user_id FROM users WHERE user_id = %s", (target_user_id,)).fetchone()
+        if not target:
+            raise HTTPException(status_code=404, detail="Usuario no encontrado")
+        connection.execute("UPDATE users SET is_active = %s WHERE user_id = %s", (body.is_active, target_user_id))
+        if not body.is_active:
+            connection.execute("DELETE FROM auth_sessions WHERE user_id = %s", (target_user_id,))
+
+    return {"message": "Estado de cuenta actualizado correctamente por el administrador"}
