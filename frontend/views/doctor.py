@@ -5,12 +5,20 @@ from util import logout, handle_api_error
 
 def doctor_view(embedded: bool = False, key_prefix: str = "doc"):
     session = st.session_state["session"]
+    role = st.session_state.get("role", "DOCTOR")
+
+    is_res = (role == "RESEARCHER")
+    icono = "🔬" if is_res else "👨‍⚕️"
+    titulo_profesional = "Investigador/a" if is_res else "Dr/a."
+    subtitulo = "Centro de Investigación" if is_res else "🩺 Especialista"
+    titulo_panel = "Panel de Investigación" if is_res else "Panel Médico Principal"
+
     option_menu = "👥 Directorio de Pacientes"  # Default option for embedded view
     # --- SIDEBAR NAVIGATION ---
     if not embedded:
         with st.sidebar:
-            st.markdown(f"### 👨‍⚕️ Dr/a. {st.session_state.get('username', '')}")
-            st.caption("🩺 Especialista")
+            st.markdown(f"### {icono} {titulo_profesional} {st.session_state.get('username', '')}")
+            st.caption(subtitulo)
             
             st.divider()
             
@@ -18,7 +26,7 @@ def doctor_view(embedded: bool = False, key_prefix: str = "doc"):
             option_menu = st.radio(
                 "Selecciona una vista:",
                 ["🏠 Panel Principal", "👥 Directorio de Pacientes"],
-                label_visibility="collapsed" 
+                label_visibility="collapsed"
             )        
             st.divider()
             

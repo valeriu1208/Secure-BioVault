@@ -24,8 +24,9 @@ def main():
     role = st.session_state.get("role", "PATIENT")
     if role == "ADMIN":
         admin_page()
-    elif role == "DOCTOR":
-        doctor_view(key_prefix="doc")
+    elif role in ["DOCTOR", "RESEARCHER"]:
+        prefix = "doc" if role == "DOCTOR" else "res"
+        doctor_view(key_prefix=prefix)
     else:
         vault_page(key_prefix="vault")
 
