@@ -59,6 +59,19 @@ def load_encryption_key() -> bytes:
     return key
 
 
+def load_field_encryption_key() -> bytes:
+    value = os.environ.get("FIELD_ENCRYPTION_KEY")
+    if not value:
+        raise RuntimeError("FIELD_ENCRYPTION_KEY must be set to a base64-encoded 32-byte key")
+    try:
+        key = base64.b64decode(value, altchars=b"-_", validate=True)
+    except binascii.Error as exc:
+        raise RuntimeError("FIELD_ENCRYPTION_KEY must be valid base64") from exc
+    if len(key) != 32:
+        raise RuntimeError("FIELD_ENCRYPTION_KEY must decode to exactly 32 bytes")
+    return key
+
+
 def load_jwt_keys() -> tuple[Ed25519PrivateKey, Ed25519PublicKey]:
     private_path = os.environ.get("JWT_PRIVATE_KEY_PATH")
     public_path = os.environ.get("JWT_PUBLIC_KEY_PATH")
@@ -89,6 +102,7 @@ async def lifespan(app: FastAPI):
         raise RuntimeError("DATABASE_URL must be set")
 
     app.state.file_encryption_key = load_encryption_key()
+    app.state.field_encryption_key = load_field_encryption_key()
     app.state.jwt_private_key, app.state.jwt_public_key = load_jwt_keys()
     app.state.opa_url = os.environ.get("OPA_URL", "http://localhost:8181").rstrip("/")
     with ConnectionPool(
@@ -295,6 +309,26 @@ def decrypt_file(
     return AESGCM(data_key).decrypt(data_nonce, content, file_id.bytes)
 
 
+def encrypt_field(text: str, key: bytes) -> str:
+    nonce = secrets.token_bytes(12)
+    ciphertext = AESGCM(key).encrypt(nonce, text.encode("utf-8"), None)
+    return base64.b64encode(nonce + ciphertext).decode("ascii")
+
+
+def decrypt_field(enc_text: str, key: bytes) -> str:
+    try:
+        data = base64.b64decode(enc_text)
+        nonce, ciphertext = data[:12], data[12:]
+        return AESGCM(key).decrypt(nonce, ciphertext, None).decode("utf-8")
+    except Exception:
+        return "[DATOS CORRUPTOS]"
+
+
+# Creates hash for DB lookup (via user email)
+def get_blind_index(text: str) -> str:
+    return hashlib.sha256(text.lower().strip().encode("utf-8")).hexdigest()
+
+
 @app.get("/")
 def read_root() -> dict[str, str]:
     return {"message": "Secure BioVault API is running"}
@@ -325,20 +359,25 @@ def health_check(
 
 @app.post("/auth/register", status_code=201)
 def register(
+    request: Request,
     body: RegisterIn,
     connection: Connection[Any] = Depends(get_db_connection),
 ) -> dict[str, str]:
     try:
+        # field-level enc & blind index (hash)
+        enc_email = encrypt_field(body.email, request.app.state.field_encryption_key)
+        email_hash = get_blind_index(body.email)
+
         with connection.transaction():
             user = connection.execute(
                 """
-                INSERT INTO users (username, email, role_id)
-                SELECT %s, %s, role_id
+                INSERT INTO users (username, email, email_hash, role_id)
+                SELECT %s, %s, %s, role_id
                 FROM roles
                 WHERE role_name = 'PATIENT'
                 RETURNING user_id
                 """,
-                (body.username, body.email),
+                (body.username, enc_email, email_hash),
             ).fetchone()
             if user is None:
                 raise HTTPException(status_code=503, detail="Patient role is not configured")
@@ -387,8 +426,9 @@ def token(
 
 
 @app.get("/users/me")
-def me(user: dict[str, Any] = Depends(current_user)) -> dict[str, str]:
-    return {"username": user["username"], "email": user["email"], "role": user["role_name"]}
+def me(request: Request, user: dict[str, Any] = Depends(current_user)) -> dict[str, str]:
+    dec_email = decrypt_field(user["email"], request.app.state.field_encryption_key)
+    return {"username": user["username"], "email": dec_email, "role": user["role_name"]}
 
 
 @app.get("/files")
@@ -523,6 +563,8 @@ def delete_file(
     ).fetchone()
     if deleted is None:
         raise HTTPException(status_code=404, detail="Documento no encontrado")
+
+
 @app.post("/auth/logout", status_code=204)
 def logout(
     request: Request,
@@ -545,16 +587,19 @@ def logout(
             (token_hash,)
         )
     except jwt.InvalidTokenError:
-        pass  
+        pass
+
+
 @app.get("/admin/users")
 def list_all_users(
+    request: Request,
     user: dict[str, Any] = Depends(current_user),
     connection: Connection[Any] = Depends(get_db_connection),
 ) -> list[dict[str, Any]]:
     if user["role_name"] != "ADMIN":
         raise HTTPException(status_code=403, detail="Requiere privilegios de administrador")
     
-    return connection.execute(
+    users_db = connection.execute(
         """
         SELECT u.user_id, u.username, u.email, r.role_name, u.is_active
         FROM users u
@@ -562,6 +607,12 @@ def list_all_users(
         ORDER BY u.created_at DESC
         """
     ).fetchall()
+
+    for u in users_db:
+        u['email'] = decrypt_field(u['email'], request.app.state.field_encryption_key)
+    return users_db
+
+
 @app.patch("/admin/users/{target_user_id}/role")
 def update_user_role(  target_user_id: uuid.UUID,
     body: RoleUpdateIn,
@@ -592,11 +643,12 @@ def update_user_role(  target_user_id: uuid.UUID,
 
 @app.get("/doctor/patients")
 def search_patients(
+    request: Request,
     query: str = "",
     user: dict[str, Any] = Depends(current_user),
     connection: Connection[Any] = Depends(get_db_connection),
 ) -> list[dict[str, Any]]:
-    if user["role_name"] not in ("DOCTOR", "ADMIN"):
+    if user["role_name"] not in ("DOCTOR", "RESEARCHER", "ADMIN"):
         raise HTTPException(status_code=403, detail="Acceso denegado")
 
     sql = """
@@ -606,11 +658,17 @@ def search_patients(
         WHERE r.role_name = 'PATIENT'
     """
     params = []
-    if query:
-        sql += " AND (u.username ILIKE %s OR u.email ILIKE %s)"
-        params.extend([f"%{query}%", f"%{query}%"])
+    if query: # partial name or email hash
+        email_hash = get_blind_index(query)
+        sql += " AND (u.username ILIKE %s OR u.email_hash = %s)"
+        params.extend([f"%{query}%", email_hash])
     
-    return connection.execute(sql, params).fetchall()
+    patients = connection.execute(sql, params).fetchall()
+    # decrypt email field
+    for p in patients:
+        p['email'] = decrypt_field(p['email'], request.app.state.field_encryption_key)
+    return patients
+
 
 @app.get("/doctor/patients/{patient_id}/files")
 def list_patient_files_for_doctor(
@@ -638,6 +696,7 @@ def list_patient_files_for_doctor(
         (patient_id,),
     ).fetchall()
 
+
 @app.delete("/users/me")
 def delete_user(
     body: DeleteAccountIn,
@@ -656,7 +715,6 @@ def delete_user(
         connection.execute("DELETE FROM auth_sessions WHERE user_id = %s", (user_id,))
     return {"message": "Usuario desactivado correctamente"}
 
-    
 
 @app.delete("/admin/users/{target_user_id}")
 def delete_user_by_admin(
@@ -675,6 +733,7 @@ def delete_user_by_admin(
         connection.execute("DELETE FROM auth_sessions WHERE user_id = %s", (target_user_id,))
 
     return {"message": "Usuario desactivado correctamente por el administrador"}
+
 
 @app.patch("/admin/users/{target_user_id}/active")
 def update_user_active_status(

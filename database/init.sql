@@ -29,7 +29,8 @@ INSERT INTO roles (role_name) VALUES
 CREATE TABLE users (
     user_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     username VARCHAR(100) NOT NULL,
-    email VARCHAR(255) UNIQUE NOT NULL,
+    email VARCHAR(255) NOT NULL, -- encrypted field
+    email_hash VARCHAR(64) UNIQUE NOT NULL, -- for user search
     role_id INT NOT NULL REFERENCES roles(role_id) ON DELETE RESTRICT,
     is_active BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
@@ -100,15 +101,16 @@ CREATE TABLE access_logs (
     timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 WITH new_admin AS(
-    INSERT INTO users (user_id, username, email, role_id, is_active) VALUES (
+    INSERT INTO users (user_id, username, email, email_hash, role_id, is_active) VALUES (
         '8204e6b7-36d7-4d65-ab3f-9db8e789fa69',
         'admin',
         'admin@securebiovault.com',
+        '8b8b09339e0ebddffb3d7ab710a30b5e9c9ffb8b2eefd092fb1faabfbe8f1a8c', -- SHA-256 of admin@securebiovault.com
         (SELECT role_id FROM roles WHERE role_name = 'ADMIN'),
         TRUE
     )
     RETURNING user_id
-    )
-    INSERT INTO credential_store (user_id, password_hash) 
-        (SELECT user_id, '$argon2id$v=19$m=65536,t=3,p=4$yALj6jnDv/1woclUeB/L/g$J7S+N+Ioxij2q5sY46kQW4ha1Ro7MFkO2ergfJpDOFM' FROM new_admin
+)
+INSERT INTO credentials (user_id, password_hash)
+    (SELECT user_id, '$argon2id$v=19$m=65536,t=3,p=4$yALj6jnDv/1woclUeB/L/g$J7S+N+Ioxij2q5sY46kQW4ha1Ro7MFkO2ergfJpDOFM' FROM new_admin
 )

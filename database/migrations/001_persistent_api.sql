@@ -1,4 +1,5 @@
 ALTER TABLE users ADD COLUMN IF NOT EXISTS username VARCHAR(100);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email_hash VARCHAR(64);
 
 UPDATE users
 SET username = 'user_' || user_id::text
