@@ -18,8 +18,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          ref: master
           
       # 1. Build and start your entire stack in the background
       - name: Start Application Stack
