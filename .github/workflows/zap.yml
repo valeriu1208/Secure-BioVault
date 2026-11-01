@@ -8,7 +8,7 @@ on:
 
 permissions:
   contents: read
-  issues: write
+  issues: write       
   security-events: write 
 
 jobs:
@@ -18,17 +18,18 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          ref: master
+      # 1. Build and start stack
+      - name: RUN MAKE
+        run: make key
           
-      # 1. Build and start your entire stack in the background
-      - name: Start Application Stack
+      # 2. Build and start your entire stack in the background
+      - name: RUN DOCKER COMPOSE
         run: |
           docker compose up --build -d
-          
+
           sleep 15 
           
-      # 2. Run the ZAP Scan against the frontend container
+      # 3. Run the ZAP Scan against the frontend container
       - name: ZAP Scan
         uses: zaproxy/action-full-scan@v0.13.0
         with:
