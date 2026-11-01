@@ -120,8 +120,10 @@ def list_patient_files(session: Session, patient_id: str) -> list[dict]:
 
 def delete_my_account(session: Session, password: str) -> None:
     return _request("DELETE", "/users/me", session, json={"password": password}).json()
+
 def delete_user(session: Session, target_user_id: str) -> None:
     return _request("DELETE", f"/admin/users/{target_user_id}", session).json()
+
 def update_user_active_status(session: Session, target_user_id: str, is_active: bool) -> dict:
     return _request(
         "PATCH",
@@ -129,3 +131,12 @@ def update_user_active_status(session: Session, target_user_id: str, is_active: 
         session,
         json={"is_active": is_active}
     ).json()
+
+def request_role_change(session: Session, req_role: str, justification: str) -> dict:
+    return _request("POST", "/users/me/role-request", session, json={"req_role": req_role, "justification": justification}).json()
+
+def get_role_requests(session: Session) -> list[dict]:
+    return _request("GET", "/admin/role-requests", session).json()
+
+def resolve_role_request(session: Session, req_id: str, status: str) -> dict:
+    return _request("PATCH", f"/admin/role-requests/{req_id}", session, json={"status": status}).json()
