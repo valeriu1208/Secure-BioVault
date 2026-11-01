@@ -1,0 +1,38 @@
+name: ZAP Active Scan
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  issues: write
+  security-events: write 
+
+jobs:
+  zap_scan:
+    runs-on: ubuntu-latest
+    name: Scan the web application
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          
+      # 1. Build and start your entire stack in the background
+      - name: Start Application Stack
+        run: |
+          docker compose up --build -d
+          
+          sleep 15 
+          
+      # 2. Run the ZAP Scan against the frontend container
+      - name: ZAP Scan
+        uses: zaproxy/action-full-scan@v0.13.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          docker_name: 'ghcr.io/zaproxy/zaproxy:stable'
+          target: 'http://localhost:8501' 
+          cmd_options: '-a'
