@@ -621,19 +621,28 @@ def list_all_users(
 
 
 @app.patch("/admin/users/{target_user_id}/role")
-def update_user_role(  target_user_id: uuid.UUID,
+def update_user_role(  
+    request: Request,
+    target_user_id: uuid.UUID,
     body: RoleUpdateIn,
     user: dict[str, Any] = Depends(current_user),
     connection: Connection[Any] = Depends(get_db_connection),
 ) -> dict[str, str]:
-    if user["role_name"] != "ADMIN":
-        raise HTTPException(status_code=403, detail="Requiere privilegios de administrador")
-        
+    # Delegar la verificación de permisos a OPA
+    authorize_file_access(
+        request,
+        user,
+        "change_role",
+        resource=str(target_user_id),
+        connection=connection,
+        denial_status_code=403
+    )
+
     role_record = connection.execute(
         "SELECT role_id FROM roles WHERE role_name = %s", 
         (body.new_role,)
     ).fetchone()
-    
+
     if not role_record:
         raise HTTPException(status_code=400, detail="Rol inválido")
 
@@ -641,10 +650,10 @@ def update_user_role(  target_user_id: uuid.UUID,
         "UPDATE users SET role_id = %s WHERE user_id = %s RETURNING user_id",
         (role_record["role_id"], target_user_id)
     ).fetchone()
-    
+
     if not updated:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
-        
+
     return {"message": f"Rol actualizado a {body.new_role}"}
 
 
