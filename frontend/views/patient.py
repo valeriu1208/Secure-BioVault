@@ -92,6 +92,25 @@ def vault_page(embedded: bool = False, key_prefix: str = "vault"):
 
     elif option_menu == "⚙️ Configuración":
         st.title("⚙️ Configuración de Cuenta")
+
+        st.subheader("🎓 Cuenta Profesional")
+        with st.expander("Solicitar cuenta de Médico o Investigador"):
+            with st.form("role_req_form"):
+                st.write("Si eres personal sanitario o de investigación, verifica tu identidad:")
+                new_role = st.selectbox("Rol solicitado", ["DOCTOR", "RESEARCHER"])
+                justification = st.text_area("Justificación (Nº Colegiado, Centro, Proyecto...)")
+
+                if st.form_submit_button("Enviar solicitud", type="primary"):
+                    if not justification:
+                        st.error("Debes incluir una justificación.")
+                    else:
+                        try:
+                            api.request_role_change(session, new_role, justification)
+                            st.success("Solicitud enviada. Un administrador la revisará en breve.")
+                        except api.ApiError as exc:
+                            handle_api_error(exc)
+
+        st.divider()
         
         st.subheader("Zona de Peligro")
         with st.expander("🚨 Eliminar mi cuenta"):

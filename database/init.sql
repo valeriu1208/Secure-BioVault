@@ -100,11 +100,22 @@ CREATE TABLE access_logs (
     ip_address VARCHAR(45),
     timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Requests to change role
+CREATE TABLE IF NOT EXISTS role_requests (
+    req_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    req_role VARCHAR(50) NOT NULL,
+    justification TEXT NOT NULL,
+    status VARCHAR(20) DEFAULT 'PENDING',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
 WITH new_admin AS(
     INSERT INTO users (user_id, username, email, email_hash, role_id, is_active) VALUES (
         '8204e6b7-36d7-4d65-ab3f-9db8e789fa69',
         'admin',
-        'admin@securebiovault.com',
+        'BhuikCIgqbtxraVbb7RmhW84xRAjtErNcloYPoeDcfKI37v2CECzLaMQ7C3S6gKoHKUxEQ==', -- email encrypted
         '8b8b09339e0ebddffb3d7ab710a30b5e9c9ffb8b2eefd092fb1faabfbe8f1a8c', -- SHA-256 of admin@securebiovault.com
         (SELECT role_id FROM roles WHERE role_name = 'ADMIN'),
         TRUE

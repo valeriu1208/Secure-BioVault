@@ -126,6 +126,13 @@ class RegisterIn(BaseModel):
 class RoleUpdateIn(BaseModel):
     new_role: str = Field(pattern="^(PATIENT|DOCTOR|ADMIN|RESEARCHER)$")
 
+class RoleRequestIn(BaseModel):
+    req_role: str = Field(pattern="^(DOCTOR|RESEARCHER)$")
+    justification: str = Field(max_length=500)
+
+class ResolveRequestIn(BaseModel):
+    status: str = Field(pattern="^(APPROVED|REJECTED)$")
+
 class DeleteAccountIn(BaseModel):
     password: str = Field(min_length=1)
 
@@ -754,3 +761,74 @@ def update_user_active_status(
             connection.execute("DELETE FROM auth_sessions WHERE user_id = %s", (target_user_id,))
 
     return {"message": "Estado de cuenta actualizado correctamente por el administrador"}
+
+
+@app.post("/users/me/role-request", status_code=201)
+def create_role_request(
+    body: RoleRequestIn,
+    user: dict[str, Any] = Depends(current_user),
+    connection: Connection[Any] = Depends(get_db_connection),
+) -> dict[str, str]:
+    # Avoid spamming
+    pending = connection.execute(
+        "SELECT 1 FROM role_requests WHERE user_id = %s AND status = 'PENDING'",
+        (user['user_id'],)
+    ).fetchone()
+    if pending:
+        raise HTTPException(status_code=400, detail="Ya tienes una solicitud de cambio de rol pendiente.")
+
+    connection.execute(
+        "INSERT INTO role_requests (user_id, req_role, justification) VALUES (%s, %s, %s)",
+        (user['user_id'], body.req_role, body.justification)
+    )
+    return {"message": "Solicitud enviada con éxito"}
+
+@app.get("/admin/role-requests")
+def list_role_requests(
+    request: Request,
+    user: dict[str, Any] = Depends(current_user),
+    connection: Connection[Any] = Depends(get_db_connection),
+) -> list[dict[str, Any]]:
+    if user['role_name'] != "ADMIN":
+        raise HTTPException(status_code=403, detail="Se requieren privilegios de administrador")
+
+    requests_db = connection.execute(
+        """
+        SELECT r.req_id, u.username, u.email, r.req_role, r.justification, r.created_at
+        FROM role_requests r
+        JOIN users u ON r.user_id = u.user_id
+        WHERE r.status = 'PENDING'
+        ORDER BY r.created_at ASC
+        """
+    ).fetchall()
+
+    # Decrypt emails (for admin's view only)
+    for r in requests_db:
+        r['email'] = decrypt_field(r['email'], request.app.state.field_encryption_key)
+    return requests_db
+
+@app.patch("/admin/role-requests/{request_id}")
+def resolve_role_request(
+    request_id: uuid.UUID,
+    body: ResolveRequestIn,
+    user: dict[str, Any] = Depends(current_user),
+    connection: Connection[Any] = Depends(get_db_connection),
+) -> dict[str, str]:
+    if user['role_name'] != "ADMIN":
+        raise HTTPException(status_code=403, detail="Se requieren privilegios de administrador")
+
+    with connection.transaction():
+        req = connection.execute(
+            "SELECT user_id, req_role FROM role_requests WHERE req_id = %s AND status = 'PENDING'",
+            (request_id,)
+        ).fetchone()
+
+        if not req:
+            raise HTTPException(status_code=404, detail="Solicitud no encontrada o ya resuelta")
+
+        connection.execute("UPDATE role_requests SET status = %s WHERE req_id = %s", (body.status, request_id))
+        if body.status == "APPROVED":
+            role_record = connection.execute("SELECT role_id FROM roles WHERE role_name = %s", (req['req_role'],)).fetchone()
+            connection.execute("UPDATE users SET role_id = %s WHERE user_id = %s", (role_record['role_id'], req['user_id']))
+
+    return {"message": f"Solicitud {body.status.lower()}"}

@@ -20,10 +20,11 @@ def auth_page():
             else:
                 try:
                     token = api.login(username, password)
-                    st.session_state["session"] = token
-                    st.session_state["username"] = username
                     profile = api.me(token)
+
                     st.session_state["role"] = profile.get("role", "PATIENT")
+                    st.session_state["username"] = username
+                    st.session_state["session"] = token
 
                     st.rerun()
                 except api.ApiError as exc:

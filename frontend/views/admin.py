@@ -36,6 +36,36 @@ def admin_page():
     # --- MAIN CONTENT ROUTING ---
     if option_menu == "👥 Gestión de Usuarios":
         st.title("🛡️ Gestión de Roles y Usuarios")
+
+        # ROLE CHANGE REQs
+        try:
+            reqs = api.get_role_requests(session)
+            if reqs:
+                with st.expander(f"🔔 Solicitudes de ascenso pendientes ({len(reqs)})", expanded=True):
+                    for r in reqs:
+                        st.markdown(f"**{r['username']}** ({r['email']}) solicita ser **{r['req_role']}**")
+                        st.caption(f"Justificación: {r['justification']}")
+                        col_ok, col_ko, _ = st.columns([2, 2, 6])
+                        if col_ok.button("✅ Aprobar", key=f"app_{r['req_id']}", type="primary"):
+                            try:
+                                api.resolve_role_request(session, str(r['req_id']), "APPROVED")
+                                st.success("Ascenso aprobado.")
+                                st.rerun()
+                            except api.ApiError as exc:
+                                handle_api_error(exc)
+                        if col_ko.button("❌ Rechazar", key=f"rej_{r['req_id']}"):
+                            try:
+                                api.resolve_role_request(session, str(r['req_id']), "REJECTED")
+                                st.info("Solicitud rechazada.")
+                                st.rerun()
+                            except api.ApiError as exc:
+                                handle_api_error(exc)
+
+                st.divider()
+        except api.ApiError as exc:
+            pass
+
+        # Users list for manual change
         try:
             users = api.list_all_users(session)
             for u in users:

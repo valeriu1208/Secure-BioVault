@@ -29,7 +29,7 @@ def logout():
         except api.ApiError as exc:
             st.warning(f"Error al cerrar sesión: {exc}")
     # El token vive solo en st.session_state (memoria del servidor de Streamlit)
-    for key in ("session", "username"):
+    for key in ("session", "username", "role"):
         st.session_state.pop(key, None)
     st.rerun()
  
