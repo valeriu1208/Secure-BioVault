@@ -21,6 +21,10 @@ jobs:
       # 1. Build and start stack
       - name: RUN MAKE
         run: make key
+      - name: Set Permissions
+        run: |
+          make key
+          chmod 644 secrets/jwt_*.pem
           
       # 2. Build and start your entire stack in the background
       - name: RUN DOCKER COMPOSE
