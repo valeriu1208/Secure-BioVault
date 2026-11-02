@@ -43,6 +43,12 @@ BACKEND_URL=https://mi-backend:8000 streamlit run app.py
 | POST | `/files` | Multipart `file` + `description` |
 | GET | `/files/{id}` | Descarga el PDF descifrado |
 | DELETE | `/files/{id}` | Borra el documento |
+| POST | `/files/{id}/access-requests` | Solicita permiso para un fichero |
+| GET | `/access-requests/incoming` | Lista solicitudes recibidas por el paciente |
+| PATCH | `/access-requests/{request_id}` | Aprueba o deniega una solicitud |
+| POST | `/files/{id}/permissions` | Concede acceso directo a un profesional |
+| GET | `/files/{id}/permissions` | Lista permisos activos del fichero (solo propietario) |
+| DELETE | `/files/{id}/permissions/{user_id}` | Revoca el permiso de un profesional (solo propietario) |
 
 Si tu FastAPI usa otras rutas, edita solo `api_client.py`.
 

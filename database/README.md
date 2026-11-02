@@ -18,10 +18,11 @@ The database design incorporates privacy, security, and access control features 
 1. **`roles`** and **`users`**: Define user roles, identities, and active status.
 2. **`credentials`**: Stores Argon2id password hashes separately from user records.
 3. **`patient_profiles`**: Holds encrypted PII fields.
-4. **`consents`**: Stores consent attributes for future policy rules. The initial Rego policy currently grants file access only to the owner.
+4. **`consents`**: Stores patient-level consent attributes used by authorization rules.
 5. **`files`**: Stores file metadata, AES-GCM ciphertext, wrapped per-file data keys, and nonces.
-6. **`auth_sessions`**: Stores hashes of JWT IDs and their expiration times.
-7. **`access_logs`**: Schema for access decisions and audit events.
+6. **`file_permissions`** and **`file_access_requests`**: Store per-file grants and pending access requests.
+7. **`auth_sessions`**: Stores hashes of JWT IDs and their expiration times.
+8. **`access_logs`**: Schema for access decisions and audit events.
 
 ### Database Commands (`Makefile`)
 

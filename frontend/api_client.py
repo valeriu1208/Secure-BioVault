@@ -121,7 +121,7 @@ def list_patient_files(session: Session, patient_id: str) -> list[dict]:
 def request_file_access(session: Session, file_id: str, reason: str = "") -> dict:
     return _request("POST", f"/files/{file_id}/access-requests", session, json={"file_id": file_id, "reason": reason}).json()
 
-def get_incoming_access_requests(session: Session) -> dict:
+def get_incoming_access_requests(session: Session) -> list[dict]:
     return _request("GET", f"/access-requests/incoming", session).json()
 
 def respond_access_request(session: Session, request_id: str, status: str) -> dict:
@@ -129,6 +129,12 @@ def respond_access_request(session: Session, request_id: str, status: str) -> di
 
 def grant_file_access(session: Session, file_id: str, target_user_id: str) -> dict:
     return _request("POST", f"/files/{file_id}/permissions", session, json={"target_user_id": target_user_id}).json()
+
+def list_file_permissions(session: Session, file_id: str) -> list[dict]:
+    return _request("GET", f"/files/{file_id}/permissions", session).json()
+
+def revoke_file_access(session: Session, file_id: str, target_user_id: str) -> None:
+    _request("DELETE", f"/files/{file_id}/permissions/{target_user_id}", session)
 
 def list_professionals(session: Session) -> list[dict]:
     return _request("GET", "/users/professionals", session).json()
