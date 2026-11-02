@@ -815,7 +815,7 @@ def update_user_role(
         request,
         user,
         "change_role",
-        resource=str(target_user_id),
+        owner_id=target_user_id,
         connection=connection,
         denial_status_code=403
     )
