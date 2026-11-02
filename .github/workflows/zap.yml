@@ -42,15 +42,21 @@ jobs:
         env:
           ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
         run: |
+          # 1. Acquire JWT token from backend auth endpoint
           RESPONSE=$(curl -s -X POST http://localhost:8000/auth/token \
             -H "Content-Type: application/x-www-form-urlencoded" \
-            -d "username="admin" \
-            -d "password= $ADMIN_PASSWORD" )
+            -d "username=admin" \
+            -d "password=${ADMIN_PASSWORD}")
           
-          # Extract the token using jq (assuming your app returns {"token": "ey..."})
-          TOKEN=$(echo $RESPONSE | jq -r .token)
-          
-          # Save it so the next step can use it
+          # 2. Extract token (supports either .access_token or .token response format)
+          TOKEN=$(echo "$RESPONSE" | jq -r '.access_token // .token // empty')
+
+          if [ -z "$TOKEN" ]; then
+            echo "Failed to acquire auth token! Response: $RESPONSE"
+            exit 1
+          fi
+
+          # 3. Export token to GITHUB_ENV for OWASP ZAP step
           echo "DYNAMIC_TOKEN=$TOKEN" >> $GITHUB_ENV
 
       # 2. Run ZAP using the dynamically generated token
