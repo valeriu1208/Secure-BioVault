@@ -567,7 +567,7 @@ def download(
         request,
         user,
         "read",
-        record["owner_id"],
+        file_id,
         connection,
         denial_status_code=404,
     )
@@ -598,12 +598,17 @@ def create_file_access_request(
     user: dict[str, Any] = Depends(current_user),
     connection: Connection[Any] = Depends(get_db_connection),
 ) -> dict[str, str]:
+    if user["role_name"] not in ("DOCTOR", "RESEARCHER"):
+        raise HTTPException(status_code=403, detail="Solo médicos e investigadores pueden solicitar acceso")
+
     # Check file exists
     file_record = connection.execute(
         "SELECT owner_id FROM files WHERE file_id = %s", (file_id,)
     ).fetchone()
     if not file_record:
         raise HTTPException(status_code=404, detail="Fichero no encontrado")
+    if file_record["owner_id"] == user["user_id"]:
+        raise HTTPException(status_code=400, detail="No puedes solicitar acceso a tu propio fichero")
 
     # Register request pending of approval
     connection.execute(
@@ -689,6 +694,20 @@ def grant_file_access(
     if not file_record:
         raise HTTPException(status_code=404, detail="Fichero no encontrado")
 
+    target_user = connection.execute(
+        """
+        SELECT u.user_id
+        FROM users AS u
+        JOIN roles AS r ON r.role_id = u.role_id
+        WHERE u.user_id = %s
+          AND u.is_active = TRUE
+          AND r.role_name IN ('DOCTOR', 'RESEARCHER')
+        """,
+        (payload.target_user_id,),
+    ).fetchone()
+    if target_user is None:
+        raise HTTPException(status_code=404, detail="Profesional activo no encontrado")
+
     # Check with OPA user is Owner or Admin
     authorize_file_access(
         request,
@@ -707,6 +726,58 @@ def grant_file_access(
         (file_id, payload.target_user_id),
     )
     return {"message": "Permiso concedido exitosamente"}
+
+
+@app.get("/files/{file_id}/permissions")
+def list_file_permissions(
+    file_id: uuid.UUID,
+    user: dict[str, Any] = Depends(current_user),
+    connection: Connection[Any] = Depends(get_db_connection),
+) -> list[dict[str, Any]]:
+    file_record = connection.execute(
+        "SELECT owner_id FROM files WHERE file_id = %s",
+        (file_id,),
+    ).fetchone()
+    if file_record is None or file_record["owner_id"] != user["user_id"]:
+        raise HTTPException(status_code=404, detail="Documento no encontrado")
+
+    return connection.execute(
+        """
+        SELECT fp.user_id, u.username, r.role_name, fp.created_at
+        FROM file_permissions AS fp
+        JOIN users AS u ON u.user_id = fp.user_id
+        JOIN roles AS r ON r.role_id = u.role_id
+        WHERE fp.file_id = %s
+        ORDER BY u.username
+        """,
+        (file_id,),
+    ).fetchall()
+
+
+@app.delete("/files/{file_id}/permissions/{target_user_id}", status_code=204)
+def revoke_file_access(
+    file_id: uuid.UUID,
+    target_user_id: uuid.UUID,
+    user: dict[str, Any] = Depends(current_user),
+    connection: Connection[Any] = Depends(get_db_connection),
+) -> None:
+    file_record = connection.execute(
+        "SELECT owner_id FROM files WHERE file_id = %s",
+        (file_id,),
+    ).fetchone()
+    if file_record is None or file_record["owner_id"] != user["user_id"]:
+        raise HTTPException(status_code=404, detail="Documento no encontrado")
+
+    deleted = connection.execute(
+        """
+        DELETE FROM file_permissions
+        WHERE file_id = %s AND user_id = %s
+        RETURNING permission_id
+        """,
+        (file_id, target_user_id),
+    ).fetchone()
+    if deleted is None:
+        raise HTTPException(status_code=404, detail="Permiso no encontrado o ya revocado")
 
 
 # List Doctor / Researcher  to grant direct permission
