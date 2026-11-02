@@ -12,4 +12,10 @@ COPY . .
 
 EXPOSE 8501
 
+RUN addgroup --system appgroup && adduser --system --group appuser
+
+RUN chown -R appuser:appgroup /app
+
+USER appuser
+
 CMD ["streamlit", "run", "app.py", "--server.address=0.0.0.0", "--server.port=8501"]

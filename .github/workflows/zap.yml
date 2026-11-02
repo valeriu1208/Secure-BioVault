@@ -34,12 +34,13 @@ jobs:
           echo "App is ready for active scanning!"
             # 1. Log in via API and save the token to the GitHub Environment
       - name: Authenticate and get token
+        env:
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
         run: |
-
-          RESPONSE=$(curl -s -X POST http://localhost:8501/auth/token \
+          RESPONSE=$(curl -s -X POST http://localhost:8000/auth/token \
             -H "Content-Type: application/x-www-form-urlencoded" \
             -d "username="admin" \
-            -d "password= ${{ secrets.ADMIN_PASSWORD }}")
+            -d "password= $ADMIN_PASSWORD" )
           
           # Extract the token using jq (assuming your app returns {"token": "ey..."})
           TOKEN=$(echo $RESPONSE | jq -r .token)
