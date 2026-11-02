@@ -25,7 +25,8 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
+          cache: 'pip'
 
       # Step 1: Install dependencies and export explicit lockfiles
       - name: Generate Pinned Freeze Files
@@ -50,7 +51,7 @@ jobs:
         with:
           scan-type: 'fs'
           scan-ref: '.'
-          scanners: 'vuln,secret'
+          scanners: 'vuln,secret,config'
           format: 'json'
           output: 'trivy-fs-results.json'
           exit-code: '0'
@@ -71,7 +72,7 @@ jobs:
         with:
           scan-type: 'fs'
           scan-ref: '.'
-          scanners: 'vuln,secret'
+          scanners: 'vuln,secret,config'
           format: 'sarif'
           output: 'trivy-fs-results.sarif'
           exit-code: '1' 

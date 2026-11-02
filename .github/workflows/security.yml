@@ -32,8 +32,8 @@ jobs:
 
       - name: Run Bandit (Python Security Linter)
         run: |
-          bandit -r backend/ -f sarif -o bandit-results.sarif || true
-          bandit -r backend/ -f json -o bandit-results.json || true
+          bandit -r backend/ -ll -f sarif -o bandit-results.sarif
+          bandit -r backend/ -ll -f json -o bandit-results.json
 
       - name: Save Bandit JSON Artifact
         uses: actions/upload-artifact@v4
@@ -60,14 +60,14 @@ jobs:
             --config p/security-audit \
             --config p/python \
             --config p/owasp-top-10 \
-            --sarif -o semgrep-results.sarif
-        continue-on-error: true
+            --sarif -o semgrep.sarif
+
 
       - name: Upload Semgrep SARIF to Security Tab
         uses: github/codeql-action/upload-sarif@v4
         if: always()
         with:
-          sarif_file: 'semgrep-results.sarif'
+          sarif_file: 'semgrep.sarif'
           category: 'semgrep-sast'
 
   # ==========================================
@@ -100,7 +100,6 @@ jobs:
 
       - name: Scan Backend Docker Image (SARIF)
         uses: aquasecurity/trivy-action@v0.35.0
-        continue-on-error: true
         with:
           scan-type: 'image'
           image-ref: 'backend-image:test'
@@ -131,8 +130,7 @@ jobs:
 
       - name: Scan Frontend Docker Image (SARIF)
         uses: aquasecurity/trivy-action@v0.35.0
-        continue-on-error: true
-        if: always()
+        if: success() || failure()
         with:
           scan-type: 'image'
           image-ref: 'frontend-image:test'
