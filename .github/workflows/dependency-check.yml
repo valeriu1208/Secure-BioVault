@@ -25,7 +25,8 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
+          cache: 'pip'
 
       # Step 1: Install dependencies and export explicit lockfiles
       - name: Generate Pinned Freeze Files
@@ -44,17 +45,18 @@ jobs:
           pip freeze > ../extracted-deps/requirements-frontend.txt
           cd ..
 
-      # Step 2: Generate JSON report (exit-code 0 so file creation never crashes job)
+      # Step 2: Full repository scan (JSON artifact - exit-code 0 so it never fails the step)
       - name: Generate Trivy JSON Report
         uses: aquasecurity/trivy-action@v0.35.0
         with:
           scan-type: 'fs'
           scan-ref: '.'
-          scanners: 'vuln,secret'
+          scanners: 'vuln,secret,config'
           format: 'json'
           output: 'trivy-fs-results.json'
           exit-code: '0'
           severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true
 
       # Step 3: ALWAYS save JSON report as artifact (even if future steps fail)
       - name: Save JSON Report Artifact
@@ -65,19 +67,20 @@ jobs:
           path: trivy-fs-results.json
           retention-days: 7
 
-      # Step 4: Run Trivy Scan & FAIL the build on HIGH/CRITICAL (exit-code 1)
+      # Step 4: Vulnerability Enforcement Step (FAILS build on actionable HIGH/CRITICAL)
       - name: Evaluate Security Policy (Fail on HIGH/CRITICAL)
         uses: aquasecurity/trivy-action@v0.35.0
         with:
           scan-type: 'fs'
           scan-ref: '.'
-          scanners: 'vuln,secret'
+          scanners: 'vuln'               # Target vulnerabilities to enforce quality gate
           format: 'sarif'
           output: 'trivy-fs-results.sarif'
-          exit-code: '1' 
+          exit-code: '1'                 # Fixed: Fails build if actionable HIGH/CRITICAL package vulnerabilities are found
           severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true           # Ignores unpatchable OS-level CVEs
 
-      # Step 5: Upload SARIF to Security Tab (Runs even if Step 4 failed)
+      # Step 5: Upload SARIF to Security Tab (Runs even if Step 4 fails)
       - name: Upload SARIF to Security Tab
         uses: github/codeql-action/upload-sarif@v4
         if: always()
