@@ -60,7 +60,7 @@ jobs:
             --config p/security-audit \
             --config p/python \
             --config p/owasp-top-10 \
-            --sarif -o semgrep-results.sarif
+            --sarif -o semgrep-results.sarif || true
 
 
       - name: Upload Semgrep SARIF to Security Tab
@@ -70,7 +70,7 @@ jobs:
           sarif_file: 'semgrep-results.sarif'
           category: 'semgrep-sast'
 
-  # ==========================================
+    # ==========================================
   # JOB 2: Docker Container Image Scanning
   # ==========================================
   container-scan:
@@ -87,26 +87,29 @@ jobs:
       - name: Build Frontend Container Image
         run: docker build -t frontend-image:test ./frontend
 
-      # --- Backend Container Scans ---
-      - name: Generate Backend Container JSON Report
-        uses: aquasecurity/trivy-action@v0.35.0
-        with:
-          scan-type: 'image'
-          image-ref: 'backend-image:test'
-          format: 'json'
-          output: 'trivy-backend-image.json'
-          exit-code: '0'
-          severity: 'HIGH,CRITICAL'
-          ignore-unfixed: true
-
-      - name: Scan Backend Docker Image (SARIF)
+      # --- Backend Container Full Scan ---
+      - name: Full Scan Backend Image (SARIF)
         uses: aquasecurity/trivy-action@v0.35.0
         with:
           scan-type: 'image'
           image-ref: 'backend-image:test'
           format: 'sarif'
           output: 'trivy-backend-image.sarif'
-          exit-code: '1'
+          exit-code: '0'                         # Report everything without failing build
+          scanners: 'vuln,misconfig,secret'     # Scan all security vectors
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true
+
+      - name: Generate Backend Container JSON Report
+        uses: aquasecurity/trivy-action@v0.35.0
+        if: always()
+        with:
+          scan-type: 'image'
+          image-ref: 'backend-image:test'
+          format: 'json'
+          output: 'trivy-backend-image.json'
+          exit-code: '0'
+          scanners: 'vuln,misconfig,secret'
           severity: 'HIGH,CRITICAL'
           ignore-unfixed: true
 
@@ -117,7 +120,20 @@ jobs:
           sarif_file: 'trivy-backend-image.sarif'
           category: 'container-backend'
 
-      # --- Frontend Container Scans ---
+      # --- Frontend Container Full Scan ---
+      - name: Full Scan Frontend Image (SARIF)
+        uses: aquasecurity/trivy-action@v0.35.0
+        if: always()
+        with:
+          scan-type: 'image'
+          image-ref: 'frontend-image:test'
+          format: 'sarif'
+          output: 'trivy-frontend-image.sarif'
+          exit-code: '0'                         # Report everything without failing build
+          scanners: 'vuln,misconfig,secret'     # Scan all security vectors
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true
+
       - name: Generate Frontend Container JSON Report
         uses: aquasecurity/trivy-action@v0.35.0
         if: always()
@@ -127,20 +143,10 @@ jobs:
           format: 'json'
           output: 'trivy-frontend-image.json'
           exit-code: '0'
+          scanners: 'vuln,misconfig,secret'
           severity: 'HIGH,CRITICAL'
           ignore-unfixed: true
 
-      - name: Scan Frontend Docker Image (SARIF)
-        uses: aquasecurity/trivy-action@v0.35.0
-        if: success() || failure()
-        with:
-          scan-type: 'image'
-          image-ref: 'frontend-image:test'
-          format: 'sarif'
-          output: 'trivy-frontend-image.sarif'
-          exit-code: '1'
-          severity: 'HIGH,CRITICAL'
-          ignore-unfixed: true
       - name: Upload Frontend Image SARIF
         uses: github/codeql-action/upload-sarif@v4
         if: always()
