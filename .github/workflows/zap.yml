@@ -66,6 +66,11 @@ jobs:
         env:
           DYNAMIC_TOKEN: ${{ env.DYNAMIC_TOKEN }}
         run: |
+          # Create placeholder report file and make it world-writable (777) 
+          # so ZAP inside the Docker container can overwrite it freely
+          touch report_html.html report_json.json report_md.md
+          chmod 777 report_html.html report_json.json report_md.md
+
           docker run --net=host -v $(pwd):/zap/wrk/:rw \
             ghcr.io/zaproxy/zaproxy:stable zap-full-scan.py \
             -t http://localhost:8000 \
@@ -85,3 +90,4 @@ jobs:
         with:
           name: zap-dast-report
           path: report_html.html
+
