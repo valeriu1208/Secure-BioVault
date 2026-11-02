@@ -139,6 +139,19 @@ class DeleteAccountIn(BaseModel):
 class UpdateUserActiveStatusIn(BaseModel):
     is_active: bool
 
+class FileAccessRequestIn(BaseModel):
+    file_id: uuid.UUID
+    reason: str = ""
+
+class GrantFileAccessIn(BaseModel):
+    target_user_id: uuid.UUID
+
+class RequestStatusUpdate(BaseModel):
+    status: str  # "APPROVED" o "DENIED"
+
+class DirectGrantIn(BaseModel):
+    target_user_id: uuid.UUID
+
 def get_db_connection(request: Request) -> Iterator[Connection[Any]]:
     pool: ConnectionPool = request.app.state.db_pool
     with pool.connection() as connection:
@@ -229,13 +242,46 @@ def authorize_file_access(
     request: Request,
     user: dict[str, Any],
     action: str,
-    owner_id: uuid.UUID,
-    connection: Connection[Any], # DB connection to access permisions
+    target_id: uuid.UUID,
+    connection: Connection[Any],
     *,
     denial_status_code: int = 403,
 ) -> None:
     allowed_users = []
     allowed_roles = []
+
+    file_record = connection.execute(
+        "SELECT file_id, owner_id FROM files WHERE file_id = %s", (target_id,)
+    ).fetchone()
+
+    if file_record:
+        file_id = str(file_record["file_id"])
+        owner_id = str(file_record["owner_id"])
+
+        # Explicit permissions for this specific file
+        file_perms = connection.execute(
+            "SELECT user_id FROM file_permissions WHERE file_id = %s", (target_id,)
+        ).fetchall()
+        for fp in file_perms:
+            allowed_users.append(str(fp["user_id"]))
+    else:
+        # target_id is a patient_id (owner_id)
+        file_id = None
+        owner_id = str(target_id)
+
+        # All permissions of the patients files
+        file_perms = connection.execute(
+            """
+            SELECT DISTINCT fp.user_id
+            FROM file_permissions fp
+            JOIN files f ON f.file_id = fp.file_id
+            WHERE f.owner_id = %s
+            """,
+            (target_id,)
+        ).fetchall()
+        for fp in file_perms:
+            allowed_users.append(str(fp["user_id"]))
+
     consents = connection.execute(
         """
         SELECT granted_to_user_id, granted_to_role
@@ -260,7 +306,8 @@ def authorize_file_access(
             "action": action,
             "resource": {
                 "type": "file",
-                "owner_id": str(owner_id),
+                "file_id": file_id,
+                "owner_id": owner_id,
                 "allowed_users": allowed_users,
                 "allowed_roles": allowed_roles,
             },
@@ -543,6 +590,141 @@ def download(
     return Response(content, media_type="application/pdf")
 
 
+# Doctor/Researcher asks for permission on a file
+@app.post("/files/{file_id}/access-requests")
+def create_file_access_request(
+    file_id: uuid.UUID,
+    payload: FileAccessRequestIn,
+    user: dict[str, Any] = Depends(current_user),
+    connection: Connection[Any] = Depends(get_db_connection),
+) -> dict[str, str]:
+    # Check file exists
+    file_record = connection.execute(
+        "SELECT owner_id FROM files WHERE file_id = %s", (file_id,)
+    ).fetchone()
+    if not file_record:
+        raise HTTPException(status_code=404, detail="Fichero no encontrado")
+
+    # Register request pending of approval
+    connection.execute(
+        """
+        INSERT INTO file_access_requests (file_id, requester_id, owner_id, status, reason)
+        VALUES (%s, %s, %s, 'PENDING', %s)
+        """,
+        (file_id, user["user_id"], file_record["owner_id"], payload.reason),
+    )
+    return {"message": "Solicitud de acceso enviada al propietario"}
+
+# List patient pending requests
+@app.get("/access-requests/incoming")
+def get_incoming_access_requests(
+    user: dict[str, Any] = Depends(current_user),
+    connection: Connection[Any] = Depends(get_db_connection),
+):
+    requests = connection.execute(
+        """
+        SELECT ar.id, ar.file_id, ar.requester_id, ar.reason, ar.created_at,
+               u.username AS requester_name, u.email AS requester_email, 
+               f.original_filename AS filename
+        FROM file_access_requests ar
+        JOIN users u ON ar.requester_id = u.user_id
+        JOIN files f ON ar.file_id = f.file_id
+        WHERE ar.owner_id = %s AND ar.status = 'PENDING'
+        ORDER BY ar.created_at DESC
+        """,
+        (user["user_id"],),
+    ).fetchall()
+    
+    return requests
+
+# Patient approves or denies access to a pending request
+@app.patch("/access-requests/{request_id}")
+def respond_access_request(
+    request_id: uuid.UUID,
+    payload: RequestStatusUpdate,
+    user: dict[str, Any] = Depends(current_user),
+    connection: Connection[Any] = Depends(get_db_connection),
+) -> dict[str, str]:
+    req = connection.execute(
+        "SELECT file_id, requester_id FROM file_access_requests WHERE id = %s AND owner_id = %s",
+        (request_id, user["user_id"]),
+    ).fetchone()
+
+    if not req:
+        raise HTTPException(status_code=404, detail="Solicitud no encontrada")
+
+    if payload.status not in ["APPROVED", "DENIED"]:
+        raise HTTPException(status_code=400, detail="Estado no válido")
+
+    connection.execute(
+        "UPDATE file_access_requests SET status = %s WHERE id = %s",
+        (payload.status, request_id),
+    )
+
+    if payload.status == "APPROVED":
+        connection.execute(
+            """
+            INSERT INTO file_permissions (file_id, user_id)
+            VALUES (%s, %s)
+            ON CONFLICT DO NOTHING
+            """,
+            (req["file_id"], req["requester_id"]),
+        )
+
+    return {"message": f"Solicitud {payload.status.lower()}"}
+
+
+#  Patient (or Admin) gives permission of a file directly
+@app.post("/files/{file_id}/permissions")
+def grant_file_access(
+    request: Request,
+    file_id: uuid.UUID,
+    payload: GrantFileAccessIn,
+    user: dict[str, Any] = Depends(current_user),
+    connection: Connection[Any] = Depends(get_db_connection),
+) -> dict[str, str]:
+    file_record = connection.execute(
+        "SELECT owner_id FROM files WHERE file_id = %s", (file_id,)
+    ).fetchone()
+    if not file_record:
+        raise HTTPException(status_code=404, detail="Fichero no encontrado")
+
+    # Check with OPA user is Owner or Admin
+    authorize_file_access(
+        request,
+        user,
+        "write",
+        file_record["owner_id"],
+        connection,
+    )
+
+    connection.execute(
+        """
+        INSERT INTO file_permissions (file_id, user_id)
+        VALUES (%s, %s)
+        ON CONFLICT DO NOTHING
+        """,
+        (file_id, payload.target_user_id),
+    )
+    return {"message": "Permiso concedido exitosamente"}
+
+
+# List Doctor / Researcher  to grant direct permission
+@app.get("/users/professionals")
+def list_professionals(
+    user: dict[str, Any] = Depends(current_user),
+    connection: Connection[Any] = Depends(get_db_connection),
+):
+    return connection.execute(
+        """
+        SELECT u.user_id, u.username, u.email, r.role_name
+        FROM users u
+        JOIN roles r ON u.role_id = r.role_id
+        WHERE r.role_name IN ('DOCTOR', 'RESEARCHER')
+        ORDER BY u.username ASC
+        """
+    ).fetchall()
+
 @app.delete("/files/{file_id}", status_code=204)
 def delete_file(
     request: Request,
@@ -693,16 +875,7 @@ def list_patient_files_for_doctor(
     user: dict[str, Any] = Depends(current_user),
     connection: Connection[Any] = Depends(get_db_connection),
 ) -> list[dict[str, Any]]:
-    if user["role_name"] != "ADMIN":
-        try:
-            authorize_file_access(request, user, "list", patient_id, connection)
-        except HTTPException:
-            raise
-        except Exception as exc:
-            logger.error("Error authorizing file access: %s", exc)
-            raise HTTPException(status_code=403, detail="No se pudo verificar el consentimiento del paciente")
-
-    return connection.execute(
+    files = connection.execute(
         """
         SELECT file_id AS id, original_filename AS filename, description, created_at
         FROM files
@@ -711,6 +884,25 @@ def list_patient_files_for_doctor(
         """,
         (patient_id,),
     ).fetchall()
+
+    result = []
+    for f in files:
+        file_dict = dict(f)
+        if user.get("role_name") == "ADMIN":
+            file_dict["has_access"] = True
+        else:
+            try:
+                # Check with OPA if current user has read access
+                authorize_file_access(request, user, "read", f["id"], connection)
+                file_dict["has_access"] = True
+            except HTTPException:
+                file_dict["has_access"] = False
+            except Exception as exc:
+                logger.error("Error al autorizar archivo %s: %s", f["id"], exc)
+                file_dict["has_access"] = False
+        result.append(file_dict)
+
+    return result
 
 
 @app.delete("/users/me")
