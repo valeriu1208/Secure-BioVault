@@ -115,30 +115,52 @@ def doctor_view(embedded: bool = False, key_prefix: str = "doc"):
             try:
                 files = api.list_patient_files(session, patient_id)
                 if not files:
-                    st.info("Este paciente no tiene documentos o el consentimiento ha expirado.")
+                    st.info("Este paciente no tiene documentos registrados.")
                 else:
                     for f in files:
                         fid = str(f.get("id"))
+                        has_access = f.get("has_access", False)
+                        
                         with st.container(border=True):
-                            col_info, col_dl = st.columns([5, 2])
-                            col_info.markdown(f"**{f.get('filename', fid)}**")
+                            col_info, col_action = st.columns([5, 3])
+                            
+                            if has_access:
+                                col_info.markdown(f"📄 **{f.get('filename', fid)}**")
+                            else:
+                                col_info.markdown(f"🔒 **{f.get('filename', fid)}** *(Sin acceso)*")
+                                
                             if f.get("description"):
                                 col_info.caption(f["description"])
                             
-                            if col_dl.button("Preparar descarga", key=f"{key_prefix}_prep_{fid}"):
-                                try:
-                                    st.session_state[f"doc_data_{fid}"] = api.download_file(session, fid)
-                                except api.ApiError as exc:
-                                    handle_api_error(exc)
+                            # Si el profesional tiene acceso, habilita la descarga
+                            if has_access:
+                                if col_action.button("Preparar descarga", key=f"{key_prefix}_prep_{fid}"):
+                                    try:
+                                        st.session_state[f"doc_data_{fid}"] = api.download_file(session, fid)
+                                    except api.ApiError as exc:
+                                        handle_api_error(exc)
+                                
+                                if f"doc_data_{fid}" in st.session_state:
+                                    col_action.download_button(
+                                        "⬇️ Descargar",
+                                        data=st.session_state[f"doc_data_{fid}"],
+                                        file_name=f.get("filename", f"{fid}.pdf"),
+                                        mime="application/pdf",
+                                        key=f"{key_prefix}_dl_{fid}",
+                                    )
+                            # Si no tiene acceso, muestra el formulario para solicitarlo
+                            else:
+                                with col_action.expander("📩 Solicitar acceso"):
+                                    reason = st.text_input(
+                                        "Motivo de la solicitud:",
+                                        key=f"{key_prefix}_req_reason_{fid}",
+                                    )
+                                    if st.button("Enviar Solicitud", key=f"{key_prefix}_req_btn_{fid}"):
+                                        try:
+                                            api.request_file_access(session, fid, reason)
+                                            st.success("Solicitud enviada correctamente al paciente.")
+                                        except api.ApiError as exc:
+                                            handle_api_error(exc)
                             
-                            if f"doc_data_{fid}" in st.session_state:
-                                col_dl.download_button(
-                                    "⬇️ Descargar",
-                                    data=st.session_state[f"doc_data_{fid}"],
-                                    file_name=f.get("filename", f"{fid}.pdf"),
-                                    mime="application/pdf",
-                                    key=f"{key_prefix}_dl_{fid}",
-                                )
             except api.ApiError as exc:
                 handle_api_error(exc)
-    

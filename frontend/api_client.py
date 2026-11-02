@@ -118,6 +118,21 @@ def search_patients(session: Session, query: str = "") -> list[dict]:
 def list_patient_files(session: Session, patient_id: str) -> list[dict]:
     return _request("GET", f"/doctor/patients/{patient_id}/files", session).json()
 
+def request_file_access(session: Session, file_id: str, reason: str = "") -> dict:
+    return _request("POST", f"/files/{file_id}/access-requests", session, json={"file_id": file_id, "reason": reason}).json()
+
+def get_incoming_access_requests(session: Session) -> dict:
+    return _request("GET", f"/access-requests/incoming", session).json()
+
+def respond_access_request(session: Session, request_id: str, status: str) -> dict:
+    return _request("PATCH", f"/access-requests/{request_id}", session, json={"status": status}).json()
+
+def grant_file_access(session: Session, file_id: str, target_user_id: str) -> dict:
+    return _request("POST", f"/files/{file_id}/permissions", session, json={"target_user_id": target_user_id}).json()
+
+def list_professionals(session: Session) -> list[dict]:
+    return _request("GET", "/users/professionals", session).json()
+
 def delete_my_account(session: Session, password: str) -> None:
     return _request("DELETE", "/users/me", session, json={"password": password}).json()
 

@@ -88,7 +88,77 @@ def vault_page(embedded: bool = False, key_prefix: str = "vault"):
 
         except api.ApiError as exc:
             handle_api_error(exc)
-    # Reemplaza el bloque de "Configuración" en views/patient.py con esto:
+
+    # Share specific files  
+    elif option_menu == "⚕️ Compartir Datos":
+        st.title("⚕️ Gestión de Permisos y Accesos")
+        
+        tab_requests, tab_grant = st.tabs(["📥 Solicitudes Pendientes", "➕ Conceder Acceso Directo"])
+
+        # Accept/Deny requests from doctors/researchers
+        with tab_requests:
+            st.subheader("Solicitudes de acceso recibidas")
+            try:
+                pending_requests = api.get_incoming_access_requests(session)
+                if not pending_requests:
+                    st.info("No tienes solicitudes de acceso pendientes.")
+                else:
+                    for req in pending_requests:
+                        req_id = str(req["id"])
+                        with st.container(border=True):
+                            col_info, col_actions = st.columns([3, 2])
+                            with col_info:
+                                st.markdown(f"**Solicitante:** {req['requester_name']}")
+                                st.markdown(f"**Fichero:** {req['filename']}")
+                                if req.get("reason"):
+                                    st.caption(f"Motivo: {req['reason']}")
+
+                            with col_actions:
+                                c1, c2 = st.columns(2)
+                                if c1.button("✅ Aprobar", key=f"app_{req_id}", type="primary"):
+                                    api.respond_access_request(session, req_id, "APPROVED")
+                                    st.success("Acceso concedido.")
+                                    st.rerun()
+                                if c2.button("❌ Denegar", key=f"den_{req_id}"):
+                                    api.respond_access_request(session, req_id, "DENIED")
+                                    st.warning("Solicitud denegada.")
+                                    st.rerun()
+            except api.ApiError as exc:
+                handle_api_error(exc)
+
+        # Grant access directly without needing a previous request
+        with tab_grant:
+            st.subheader("Otorgar acceso voluntario a un Profesional")
+            try:
+                user_files = api.list_files(session)
+                professionals = api.list_professionals(session)
+
+                if not user_files:
+                    st.info("Sube al menos un fichero a tu bóveda para poder otorgar permisos.")
+                elif not professionals:
+                    st.info("No hay médicos o investigadores registrados en el sistema.")
+                else:
+                    selected_file = st.selectbox(
+                        "Selecciona el fichero:",
+                        options=user_files,
+                        format_func=lambda f: f.get("filename") or str(f.get("id") or f.get("file_id")),
+                        key=f"{key_prefix}_grant_file_select",
+                    )
+
+                    selected_prof = st.selectbox(
+                        "Selecciona el Profesional (Médico / Investigador):",
+                        options=professionals,
+                        format_func=lambda p: f"[{p['role_name']}] {p['username']}",
+                        key=f"{key_prefix}_grant_prof_select",
+                    )
+
+                    if st.button("🔑 Otorgar Permiso Directo", type="primary", key=f"{key_prefix}_btn_grant"):
+                        fid = str(selected_file.get("file_id") or selected_file.get("id"))
+                        target_id = str(selected_prof["user_id"])
+                        api.grant_file_access(session, file_id=fid, target_user_id=target_id)
+                        st.success(f"Permiso concedido a {selected_prof['username']}.")
+            except api.ApiError as exc:
+                handle_api_error(exc)
 
     elif option_menu == "⚙️ Configuración":
         st.title("⚙️ Configuración de Cuenta")

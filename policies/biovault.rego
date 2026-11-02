@@ -14,7 +14,7 @@ allow if {
 # RULE 2: Owner (patient) can access its own files with valid actions
 allow if {
     input.subject.id == input.resource.owner_id
-    input.action in ["list", "read", "write", "delete"]
+    input.action in ["list", "read", "write", "delete", "create", "upload"]
 }
 
 # RULE 3: Doctors with user-specific or role-base consent
