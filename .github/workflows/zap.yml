@@ -23,6 +23,7 @@ jobs:
         run: make key
       - name: Set Permissions
         run: |
+          rm -rf secrets/ .env
           make key
           chmod 644 secrets/jwt_*.pem
           
