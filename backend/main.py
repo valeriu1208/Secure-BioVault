@@ -453,25 +453,29 @@ def token(
     form: OAuth2PasswordRequestForm = Depends(),
     connection: Connection[Any] = Depends(get_db_connection),
 ) -> dict[str, Any]:
-    user = connection.execute(
-        """
-        SELECT u.user_id, c.password_hash
-        FROM users AS u
-        JOIN credentials AS c ON c.user_id = u.user_id
-        WHERE u.username = %s AND u.is_active = TRUE
-        """,
-        (form.username,),
-    ).fetchone()
-    if user is None or not password_hash.verify(form.password, user["password_hash"]):
-        raise HTTPException(status_code=401, detail="Credenciales incorrectas")
-
-    access_token, token_id = issue_access_token(user["user_id"], request.app.state.jwt_private_key)
-    token_hash = hashlib.sha256(token_id.encode("utf-8")).hexdigest()
-    expires_at = datetime.now(timezone.utc) + SESSION_LIFETIME
-    connection.execute(
-        "INSERT INTO auth_sessions (token_hash, user_id, expires_at) VALUES (%s, %s, %s)",
-        (token_hash, user["user_id"], expires_at),
-    )
+    with connection.transaction():
+        user = connection.execute(
+            """
+            SELECT u.user_id, c.password_hash
+            FROM users AS u
+            JOIN credentials AS c ON c.user_id = u.user_id
+            WHERE u.username = %s AND u.is_active = TRUE
+            """,
+            (form.username,),
+        ).fetchone()
+        if user is None or not password_hash.verify(form.password, user["password_hash"]):
+            raise HTTPException(status_code=401, detail="Credenciales incorrectas")
+    
+        access_token, token_id = issue_access_token(
+            user["user_id"], request.app.state.jwt_private_key
+        )
+        token_hash = hashlib.sha256(token_id.encode("utf-8")).hexdigest()
+        expires_at = datetime.now(timezone.utc) + SESSION_LIFETIME
+        connection.execute(
+            "INSERT INTO auth_sessions (token_hash, user_id, expires_at) VALUES (%s, %s, %s)",
+            (token_hash, user["user_id"], expires_at),
+        )
+    
     return {
         "access_token": access_token,
         "token_type": "bearer",
