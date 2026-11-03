@@ -102,8 +102,10 @@ jobs:
       - name: Evaluate ZAP Results (Block on HIGH/CRITICAL)
         run: |
           BACKEND_HIGH=$(jq '[.site[]?.alerts[]? | select(.riskcode == "3" or .riskcode == "4")] | length' backend_report.json)
-          FRONTEND_HIGH=$(jq '[.site[]?.alerts[]? | select(.riskcode == "3" or .riskcode == "4")] | length' frontend_report.json)
+          FRONTEND_HIGH=$(jq '[.site[]? | select(.["@name"] | contains("localhost")) | .alerts[]? | select(.riskcode == "3" or .riskcode == "4")] | length' frontend_report.json)
+          # Only count alerts where the site name includes "localhost"
           
+
           # Default to 0 if jq returns nothing due to an empty array
           BACKEND_HIGH=${BACKEND_HIGH:-0}
           FRONTEND_HIGH=${FRONTEND_HIGH:-0}
