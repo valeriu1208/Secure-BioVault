@@ -41,8 +41,7 @@ jobs:
       # 4. Authenticate using seeded admin user from init.sql
       - name: Authenticate and get token
         env:
-          # Match this default password to whatever is defined inside init.sql
-          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD || 'admin' }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
         run: |
           # Acquire JWT token from backend auth endpoint
           RESPONSE=$(curl -s -X POST http://localhost:8000/auth/token \
@@ -58,36 +57,75 @@ jobs:
             exit 1
           fi
 
-          # Export token to GITHUB_ENV for OWASP ZAP step
           echo "DYNAMIC_TOKEN=$TOKEN" >> $GITHUB_ENV
 
-      # 5. Run Authenticated ZAP Scan against Backend API
-      - name: ZAP Full Scan (Direct Container Execution)
+      # 5. Run Authenticated ZAP Scans against Backend API & Frontend
+      - name: ZAP DAST Scans (Backend & Frontend)
         env:
           DYNAMIC_TOKEN: ${{ env.DYNAMIC_TOKEN }}
         run: |
-          # Create placeholder report file and make it world-writable (777) 
-          # so ZAP inside the Docker container can overwrite it freely
-          touch report_html.html report_json.json report_md.md
-          chmod 777 report_html.html report_json.json report_md.md
+          # Create placeholder report files and make them world-writable
+          touch backend_report.json backend_report.html frontend_report.json frontend_report.html
+          chmod 777 backend_report.json backend_report.html frontend_report.json frontend_report.html
 
+          echo "Starting Backend OpenAPI Scan..."
           docker run --net=host -v $(pwd):/zap/wrk/:rw \
-            ghcr.io/zaproxy/zaproxy:stable zap-full-scan.py \
-            -t http://localhost:8000 \
-            -J report_json.json \
-            -w report_md.md \
-            -r report_html.html \
+            ghcr.io/zaproxy/zaproxy:stable zap-api-scan.py \
+            -t http://localhost:8000/openapi.json \
+            -f openapi \
+            -J backend_report.json \
+            -r backend_report.html \
+            -I \
             -z "-config replacer.full_list\(0\).description=Auth \
                -config replacer.full_list\(0\).enabled=true \
                -config replacer.full_list\(0\).matchtype=req_header \
                -config replacer.full_list\(0\).matchstr=Authorization \
                -config replacer.full_list\(0\).regex=false \
-               -config replacer.full_list\(0\).replacement=\"Bearer $DYNAMIC_TOKEN\"" || true
+               -config replacer.full_list\(0\).replacement=\"Bearer $DYNAMIC_TOKEN\"" 
 
-      - name: Upload DAST HTML Report
+          echo "Starting Streamlit Frontend Scan..."
+          docker run --net=host -v $(pwd):/zap/wrk/:rw \
+            ghcr.io/zaproxy/zaproxy:stable zap-full-scan.py \
+            -t http://localhost:8501 \
+            -j \
+            -J frontend_report.json \
+            -r frontend_report.html \
+            -I \
+            -z "-config replacer.full_list\(0\).description=Auth \
+               -config replacer.full_list\(0\).enabled=true \
+               -config replacer.full_list\(0\).matchtype=req_header \
+               -config replacer.full_list\(0\).matchstr=Authorization \
+               -config replacer.full_list\(0\).regex=false \
+               -config replacer.full_list\(0\).replacement=\"Bearer $DYNAMIC_TOKEN\""
+
+      # 6. Evaluate all results in one go
+      - name: Evaluate ZAP Results (Block on HIGH/CRITICAL)
+        run: |
+          BACKEND_HIGH=$(jq '[.site[]?.alerts[]? | select(.riskcode == "3" or .riskcode == "4")] | length' backend_report.json)
+          FRONTEND_HIGH=$(jq '[.site[]?.alerts[]? | select(.riskcode == "3" or .riskcode == "4")] | length' frontend_report.json)
+          
+          # Default to 0 if jq returns nothing due to an empty array
+          BACKEND_HIGH=${BACKEND_HIGH:-0}
+          FRONTEND_HIGH=${FRONTEND_HIGH:-0}
+          TOTAL_HIGH=$((BACKEND_HIGH + FRONTEND_HIGH))
+          
+          echo "Backend High/Critical Alerts: $BACKEND_HIGH"
+          echo "Frontend High/Critical Alerts: $FRONTEND_HIGH"
+          
+          if [ "$TOTAL_HIGH" -gt 0 ]; then
+            echo "::error::ZAP found $TOTAL_HIGH High/Critical vulnerabilities! Blocking merge."
+            exit 1
+          else
+            echo "ZAP Scans passed: No High vulnerabilities found."
+            exit 0
+          fi
+
+      # 7. Upload both artifacts
+      - name: Upload DAST HTML Reports
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: zap-dast-report
-          path: report_html.html
-
+          name: zap-dast-reports
+          path: |
+            backend_report.html
+            frontend_report.html
