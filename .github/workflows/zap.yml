@@ -70,7 +70,7 @@ jobs:
 
           echo "Starting Backend OpenAPI Scan..."
           docker run --net=host -v $(pwd):/zap/wrk/:rw \
-            ghcr.io/zaproxy/zaproxy:stable zap-full-scan.py \
+            ghcr.io/zaproxy/zaproxy:stable zap-api-scan.py \
             -t http://localhost:8000/openapi.json \
             -f openapi \
             -J backend_report.json \
