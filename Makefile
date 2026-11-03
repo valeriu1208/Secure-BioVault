@@ -15,3 +15,10 @@ key:
 clean:
 	rm -f .env
 	rm -rf ./secrets
+
+fix_password:
+	docker compose exec backend python -c 'from getpass import getpass; from pwdlib import PasswordHash; print(PasswordHash.recommended().hash(getpass("Nova contrasenya admin: ")))'
+	echo "Write the following:"
+	echo "UPDATE credentials c SET password_hash = 'PEGA_EL_HASH' FROM users u WHERE c.user_id = u.user_id AND u.username = 'admin';"
+	echo ""	
+	docker compose exec db psql -U biovault_user -d biovault_db
