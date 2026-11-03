@@ -3,7 +3,7 @@ import re
 import streamlit as st
 import api_client as api
 from util import logout, handle_api_error
-from views.doctor import doctor_view
+from views.doctor import professional_view as doctor_view
 from views.patient import vault_page
 
 

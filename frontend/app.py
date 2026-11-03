@@ -14,7 +14,7 @@ st.set_page_config(
 
 from views.auth import auth_page
 from views.admin import admin_page
-from views.doctor import doctor_view
+from views.doctor import professional_view as doctor_view
 from views.patient import vault_page
 
 def main():
