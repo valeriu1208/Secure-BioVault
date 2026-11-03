@@ -931,6 +931,8 @@ def search_patients(
         WHERE r.role_name = 'PATIENT'
     """
     params = []
+    if user["role_name"] != "ADMIN":
+        sql += " AND u.is_active = TRUE"
     if query: # partial name or email hash
         email_hash = get_blind_index(query)
         sql += " AND (u.username ILIKE %s OR u.email_hash = %s)"

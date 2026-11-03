@@ -73,12 +73,13 @@ def doctor_view(embedded: bool = False, key_prefix: str = "doc"):
                 st.markdown("✅ **Seguridad OPA Activa:** Las métricas mostradas reflejan únicamente los datos a los que tienes acceso criptográfico autorizado en este momento.")
                 st.markdown("🔹 **Privacidad garantizada:** Si un paciente revoca su consentimiento, su perfil y documentos desaparecerán automáticamente de este panel.")
 
+        """
         with col_acciones:
             st.subheader("⚡ Acciones Rápidas")
             with st.container(border=True):
                 if st.button("🔍 Buscar en el Directorio", use_container_width=True):
                     st.info("💡 Consejo: Selecciona 'Directorio de Pacientes' en el menú lateral.")
-                    
+        """          
 
 
     elif option_menu == "👥 Directorio de Pacientes":
