@@ -26,14 +26,14 @@ jobs:
         with:
           python-version: '3.12'
 
-      # --- Bandit Scan ---
+      # --- Bandit Scan (Backend & Streamlit Frontend) ---
       - name: Install Bandit & SARIF Formatter
         run: pip install bandit bandit-sarif-formatter
 
       - name: Run Bandit (Python Security Linter)
         run: |
-          bandit -r backend/ -lll -f sarif -o bandit-results.sarif
-          bandit -r backend/ -lll -f json -o bandit-results.json
+          bandit -r backend/ frontend/ -lll -f sarif -o bandit-results.sarif
+          bandit -r backend/ frontend/ -lll -f json -o bandit-results.json
 
       - name: Save Bandit JSON Artifact
         uses: actions/upload-artifact@v4
@@ -47,7 +47,7 @@ jobs:
         uses: github/codeql-action/upload-sarif@v4
         if: always()
         with:
-          sarif_file: 'bandit-results.sarif'
+          sarif_file: 'bandit-results.sarif' 
           category: 'bandit-sast'
 
       # --- Semgrep Scan ---
@@ -62,7 +62,6 @@ jobs:
             --config p/owasp-top-10 \
             --sarif -o semgrep-results.sarif || true
 
-
       - name: Upload Semgrep SARIF to Security Tab
         uses: github/codeql-action/upload-sarif@v4
         if: always()
@@ -70,7 +69,7 @@ jobs:
           sarif_file: 'semgrep-results.sarif'
           category: 'semgrep-sast'
 
-    # ==========================================
+  # ==========================================
   # JOB 2: Docker Container Image Scanning
   # ==========================================
   container-scan:
@@ -95,8 +94,8 @@ jobs:
           image-ref: 'backend-image:test'
           format: 'sarif'
           output: 'trivy-backend-image.sarif'
-          exit-code: '0'                         # Report everything without failing build
-          scanners: 'vuln,misconfig,secret'     # Scan all security vectors
+          exit-code: '0'
+          scanners: 'vuln,misconfig,secret'
           severity: 'HIGH,CRITICAL'
           ignore-unfixed: true
 
@@ -129,8 +128,8 @@ jobs:
           image-ref: 'frontend-image:test'
           format: 'sarif'
           output: 'trivy-frontend-image.sarif'
-          exit-code: '0'                         # Report everything without failing build
-          scanners: 'vuln,misconfig,secret'     # Scan all security vectors
+          exit-code: '0'
+          scanners: 'vuln,misconfig,secret'
           severity: 'HIGH,CRITICAL'
           ignore-unfixed: true
 
@@ -160,5 +159,7 @@ jobs:
         if: always()
         with:
           name: container-scan-json-reports
-          path: trivy-*-image.json
+          path: |
+            trivy-backend-image.json
+            trivy-frontend-image.json
           retention-days: 7

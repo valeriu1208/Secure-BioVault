@@ -12,15 +12,18 @@ permissions:
 
 jobs:
   python-sca:
-    name: Extract & Scan Python Dependencies
+    name: Extract & Scan Python Dependencies & Git History
     runs-on: ubuntu-latest
     permissions:
       contents: read
       security-events: write
 
     steps:
-      - name: Checkout Code
+      # Set fetch-depth: 0 to fetch full git history for commit secret scanning
+      - name: Checkout Code (Full History)
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -28,28 +31,30 @@ jobs:
           python-version: '3.12'
           cache: 'pip'
 
-      # Step 1: Install dependencies and export explicit lockfiles
+      # Step 1: Install dependencies using isolated venvs to avoid freeze pollution
       - name: Generate Pinned Freeze Files
         run: |
           mkdir -p extracted-deps
           
-          # Backend freeze
-          cd backend
-          pip install -r requirements.txt || true
-          pip freeze > ../extracted-deps/requirements-backend.txt
-          cd ..
+          # Backend freeze in isolated venv
+          python -m venv .venv-backend
+          source .venv-backend/bin/activate
+          pip install -r backend/requirements.txt || true
+          pip freeze > extracted-deps/requirements-backend.txt
+          deactivate
           
-          # Frontend freeze
-          cd frontend
-          pip install -r requirements.txt || true
-          pip freeze > ../extracted-deps/requirements-frontend.txt
-          cd ..
+          # Frontend freeze in isolated venv
+          python -m venv .venv-frontend
+          source .venv-frontend/bin/activate
+          pip install -r frontend/requirements.txt || true
+          pip freeze > extracted-deps/requirements-frontend.txt
+          deactivate
 
-      # Step 2: Full repository scan (JSON artifact - exit-code 0 so it never fails the step)
+      # Step 2: Full repository & git history scan (JSON artifact)
       - name: Generate Trivy JSON Report
         uses: aquasecurity/trivy-action@v0.35.0
         with:
-          scan-type: 'fs'
+          scan-type: 'repo'              # 'repo' scans filesystem + git commit history
           scan-ref: '.'
           scanners: 'vuln,secret,config'
           format: 'json'
@@ -58,7 +63,7 @@ jobs:
           severity: 'HIGH,CRITICAL'
           ignore-unfixed: true
 
-      # Step 3: ALWAYS save JSON report as artifact (even if future steps fail)
+      # Step 3: Save JSON report artifact
       - name: Save JSON Report Artifact
         uses: actions/upload-artifact@v4
         if: always()
@@ -67,23 +72,35 @@ jobs:
           path: trivy-fs-results.json
           retention-days: 7
 
-      # Step 4: Vulnerability Enforcement Step (FAILS build on actionable HIGH/CRITICAL)
-      - name: Evaluate Security Policy (Fail on HIGH/CRITICAL)
+      # Step 4: SARIF Report Generation (exit-code 0 ensures SARIF is completely generated and uploaded)
+      - name: Generate Trivy SARIF Report
         uses: aquasecurity/trivy-action@v0.35.0
+        if: always()
         with:
-          scan-type: 'fs'
+          scan-type: 'repo'
           scan-ref: '.'
-          scanners: 'vuln'               # Target vulnerabilities to enforce quality gate
+          scanners: 'vuln,secret,config'
           format: 'sarif'
           output: 'trivy-fs-results.sarif'
-          exit-code: '1'                 # Fixed: Fails build if actionable HIGH/CRITICAL package vulnerabilities are found
+          exit-code: '0'
           severity: 'HIGH,CRITICAL'
-          ignore-unfixed: true           # Ignores unpatchable OS-level CVEs
+          ignore-unfixed: true
 
-      # Step 5: Upload SARIF to Security Tab (Runs even if Step 4 fails)
+      # Step 5: Upload SARIF to GitHub Security Tab
       - name: Upload SARIF to Security Tab
         uses: github/codeql-action/upload-sarif@v4
         if: always()
         with:
           sarif_file: 'trivy-fs-results.sarif'
           category: 'python-sca'
+
+      # Step 6: Security Gate Enforcement (Fails pipeline on HIGH/CRITICAL after SARIF upload)
+      - name: Evaluate Security Gate
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          scan-type: 'repo'
+          scan-ref: '.'
+          scanners: 'vuln,secret'
+          exit-code: '1'
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true
