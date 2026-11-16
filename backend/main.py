@@ -6,6 +6,7 @@ import logging
 import os
 import secrets
 import uuid
+import pyotp
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
@@ -26,7 +27,7 @@ from cryptography.hazmat.primitives.serialization import (
     load_pem_public_key,
 )
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import Response
+from fastapi.responses import Response, JSONResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from psycopg import Connection, Error as PsycopgError
 from psycopg.errors import UniqueViolation
@@ -451,21 +452,71 @@ def register(
 def token(
     request: Request,
     form: OAuth2PasswordRequestForm = Depends(),
+    totp_code: str | None = Form(default=None),
     connection: Connection[Any] = Depends(get_db_connection),
 ) -> dict[str, Any]:
     with connection.transaction():
         user = connection.execute(
             """
-            SELECT u.user_id, c.password_hash
+            SELECT u.user_id, u.email, c.password_hash, c.mfa_enabled, c.totp_secret
             FROM users AS u
             JOIN credentials AS c ON c.user_id = u.user_id
             WHERE u.username = %s AND u.is_active = TRUE
             """,
             (form.username,),
         ).fetchone()
+
         if user is None or not password_hash.verify(form.password, user["password_hash"]):
             raise HTTPException(status_code=401, detail="Credenciales incorrectas")
-    
+
+        key = request.app.state.field_encryption_key
+
+        # MFA not configured yet (First connection) 
+        if not user["mfa_enabled"]:
+            if not user["totp_secret"]:
+                secret = pyotp.random_base32()
+                enc_secret = encrypt_field(secret, key)
+                connection.execute(
+                    "UPDATE credentials SET totp_secret = %s WHERE user_id = %s",
+                    (enc_secret, user["user_id"]),
+                )
+            else:
+                secret = decrypt_field(user["totp_secret"], key)
+
+            # If code not sent, send QR to configure
+            if not totp_code:
+                dec_email = decrypt_field(user["email"], key)
+                otpauth_url = pyotp.TOTP(secret).provisioning_uri(
+                    name=dec_email, issuer_name="SecureBioVault"
+                )
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "code": "MFA_SETUP_REQUIRED",
+                        "otpauth_url": otpauth_url,
+                        "secret": secret,
+                    },
+                )
+
+            # QR scanned, send 6 digit code, verify and activate MFA
+            if not pyotp.TOTP(secret).verify(totp_code.strip(), valid_window=1):
+                raise HTTPException(status_code=401, detail="Código de verificación inválido")
+
+            connection.execute(
+                "UPDATE credentials SET mfa_enabled = TRUE WHERE user_id = %s",
+                (user["user_id"],),
+            )
+
+        # MFA already enabled
+        else:
+            if not totp_code:
+                return JSONResponse(status_code=403, content={"code": "MFA_REQUIRED"})
+
+            secret = decrypt_field(user["totp_secret"], key)
+            if not pyotp.TOTP(secret).verify(totp_code.strip(), valid_window=1):
+                raise HTTPException(status_code=401, detail="Código de verificación incorrecto o caducado")
+
+        
         access_token, token_id = issue_access_token(
             user["user_id"], request.app.state.jwt_private_key
         )
