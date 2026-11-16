@@ -17,10 +17,10 @@ VERIFY_TLS = os.getenv("VERIFY_TLS", "true").lower() != "false"
 class ApiError(Exception):
     """Error devuelto por el backend (o de conexión)."""
 
-    def __init__(self, message: str, status: int | None = None):
+    def __init__(self, message: str, status: int | None = None, payload: dict | None = None):
         super().__init__(message)
         self.status = status
-
+        self.payload = payload or {}
 
 @dataclass
 class Session:
@@ -50,11 +50,17 @@ def _request(method: str, path: str, session: Session | None = None, **kwargs):
         raise ApiError(f"No se pudo conectar con el backend: {exc}") from exc
 
     if not resp.ok:
+        payload: dict = {}
         try:
-            detail = resp.json().get("detail", resp.text)
+            body = resp.json()
+            if isinstance(body, dict):
+                payload = body["detail"] if isinstance(body.get("detail"), dict) else body
+                detail = payload.get("message") or payload.get("detail") or payload.get("code") or resp.text
+            else:
+                detail = str(body)
         except ValueError:
             detail = resp.text
-        raise ApiError(str(detail), resp.status_code)
+        raise ApiError(str(detail), resp.status_code, payload=payload)
     return resp
 
 
@@ -68,15 +74,17 @@ def register(username: str, email: str, password: str) -> dict:
     return resp.json()
 
 
-def login(username: str, password: str) -> Session:
+def login(username: str, password: str, totp_code: str | None = None) -> Session:
     # OAuth2 Password flow: el formulario va en x-www-form-urlencoded
-    resp = _request(
-        "POST", "/auth/token", data={"username": username, "password": password}
-    )
+    form_data = {"username": username, "password": password}
+    if totp_code:
+        form_data["totp_code"] = totp_code.strip()
+
+    resp = _request("POST", "/auth/token", data=form_data)
     return Session(access_token=resp.json()["access_token"])
+
 def logout(session: Session) -> None:
     return _request("POST", "/auth/logout", session)
-
 
 def me(session: Session) -> dict:
     return _request("GET", "/users/me", session).json()

@@ -12,6 +12,9 @@ DROP TABLE IF EXISTS auth_sessions CASCADE;
 DROP TABLE IF EXISTS credentials CASCADE;
 DROP TABLE IF EXISTS users CASCADE;
 DROP TABLE IF EXISTS roles CASCADE;
+DROP TABLE IF EXISTS role_requests CASCADE;
+DROP TABLE IF EXISTS file_access_requests CASCADE;
+DROP TABLE IF EXISTS file_permissions CASCADE;
 
 
 -- Create tables
@@ -41,7 +44,9 @@ CREATE UNIQUE INDEX users_username_uq ON users(username);
 CREATE TABLE credentials (
     user_id UUID PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
     password_hash VARCHAR(255) NOT NULL,
-    last_password_change TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    last_password_change TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    totp_secret TEXT NULL,
+    mfa_enabled BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 CREATE TABLE patient_profiles (
@@ -142,4 +147,4 @@ WITH new_admin AS(
 )
 INSERT INTO credentials (user_id, password_hash)
     (SELECT user_id, '$argon2id$v=19$m=65536,t=3,p=4$yALj6jnDv/1woclUeB/L/g$J7S+N+Ioxij2q5sY46kQW4ha1Ro7MFkO2ergfJpDOFM' FROM new_admin
-)
+);
