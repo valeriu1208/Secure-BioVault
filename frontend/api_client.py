@@ -5,6 +5,7 @@ distintas, solo hay que tocar este fichero.
 """
 import os
 from dataclasses import dataclass
+from urllib.parse import quote
 
 import requests
 
@@ -136,6 +137,9 @@ def list_all_users(session: Session) -> list[dict]:
 def list_files(session: Session) -> list[dict]:
     return _request("GET", "/files", session).json()
 
+def list_all_files_metadata(session) -> list[dict]:
+    return _request("GET", "/admin/files", session).json()
+
 def update_user_role(session: Session, target_user_id: str, new_role: str) -> dict:
     return _request(
         "PATCH",
@@ -158,8 +162,18 @@ def download_file(session: Session, file_id: str) -> bytes:
     return _request("GET", f"/files/{file_id}", session).content
 
 
-def delete_file(session: Session, file_id: str) -> None:
-    _request("DELETE", f"/files/{file_id}", session)
+def delete_file(session: Session, file_id: str, reason: str | None = None) -> None:
+    path = f"/files/{file_id}"
+    if reason:
+        path = f"{path}?reason={quote(reason)}"
+    _request("DELETE", path, session)
+
+def get_deletion_notices(session: Session) -> list[dict]:
+    return _request("GET", "/users/me/deletion-notices", session).json()
+
+
+def dismiss_deletion_notice(session: Session, notice_id: str) -> None:
+    _request("POST", f"/users/me/deletion-notices/{notice_id}/dismiss", session)
 
 def search_patients(session: Session, query: str = "") -> list[dict]:
     return _request("GET", f"/doctor/patients?query={query}", session).json()

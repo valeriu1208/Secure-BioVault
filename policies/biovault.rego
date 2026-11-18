@@ -6,14 +6,16 @@ import future.keywords.in
 # Security by Default => refuse all
 default allow := false
 
-# RULE 1: Admin has full access
+# RULE 1: Admin can audit, delete inapproppiate files, and manage roles (no read/download)
 allow if {
     input.subject.role == "ADMIN"
+    input.action in ["list", "delete", "change_role"]
 }
 
 # RULE 2: Owner (patient) can access its own files with valid actions
 allow if {
     input.subject.id == input.resource.owner_id
+    input.subject.role != "ADMIN" # Admin only can oversight
     input.action in ["list", "read", "write", "delete", "create", "upload"]
 }
 

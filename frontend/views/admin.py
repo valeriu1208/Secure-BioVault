@@ -19,7 +19,7 @@ def admin_page():
         st.write("### 📌 Módulos")
         option_menu = st.radio(
             "Navegación Admin",
-            ["👥 Gestión de Usuarios", "👨‍⚕️ Simular Vista Médico", "🔐 Simular Vista Bóveda"],
+            ["👥 Gestión de Usuarios", "📁 Control de Ficheros", "👨‍⚕️ Simular Vista Médico", "🔐 Simular Vista Bóveda"],
             label_visibility="collapsed"
         )
         
@@ -137,4 +137,64 @@ def admin_page():
         doctor_view(embedded=True, key_prefix="admin_tab_doc")  
 
     elif option_menu == "🔐 Simular Vista Bóveda":
-        vault_page(embedded=True, key_prefix="admin_tab_patient")  
+        vault_page(embedded=True, key_prefix="admin_tab_patient")
+
+    elif option_menu == "📁 Control de Ficheros":
+        st.title("Gestión de Ficheros")
+
+        try:
+            files = api.list_all_files_metadata(session)
+            if not files:
+                st.caption("No hay ficheros registrados en el sistema.")
+            else:
+                serach = st.text_input(
+                    "Filtrar por nombre de archivo o usuario",
+                ).strip().lower()
+
+                filtered = [
+                    f for f in files
+                    if not serach
+                    or serach in f["original_filename"].lower()
+                    or serach in f["owner_username"].lower()
+                ]
+
+                st.caption(f"Mostrando {len(filtered)} de {len(files)} ficheros")
+
+                for f in filtered:
+                    file_id_str = str(f["file_id"])
+                    with st.container(border=True):
+                        c1, c2, c3, c4 = st.columns([4, 2.6, 2, 1.4])
+                        c1.markdown(f"**📄 {f['original_filename']}**")
+                        c1.caption(f"Descripción: {f['description'] or 'Sin descripción'}")
+                        c1.caption(f"ID: `{file_id_str}`")
+
+                        c2.markdown(f"👤 **{f['owner_username']}**")
+                        c2.caption("Paciente")
+
+                        c3.write(f"Tipo: `{f['file_type']}`")
+                        c3.caption(f"Subido: {str(f['created_at'])[:19]}")
+
+                        with c4.popover("🗑️", help="Eliminar fichero por moderación"):
+                            st.markdown("**Confirmar eliminación**")
+                            reason = st.text_input(
+                                "Justificación (mín. 10 caracteres)",
+                                key=f"reason_{file_id_str}",
+                                placeholder="Ej. Reporte de contenido no clínico",
+                            )
+                            if st.button(
+                                "Eliminar definitivamente",
+                                key=f"confirm_del_{file_id_str}",
+                                type="primary",
+                                use_container_width=True,
+                            ):
+                                if len(reason.strip()) < 10:
+                                    st.warning("Introduce una justificación de al menos 10 caracteres.")
+                                else:
+                                    try:
+                                        api.delete_file(session, file_id_str, reason=reason.strip())
+                                        st.success("Fichero eliminado y registrado en auditoría.")
+                                        st.rerun()
+                                    except api.ApiError as exc:
+                                        handle_api_error(exc)
+        except api.ApiError as exc:
+            handle_api_error(exc)
