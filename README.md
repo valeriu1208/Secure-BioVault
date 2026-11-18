@@ -241,3 +241,76 @@ API. Set `BACKEND_URL` to override it.
 
 OPA policy unit tests are in `policies/biovault_test.rego` and can be run with
 `docker compose run --rm opa test /policies`.
+
+## 10. DevSecOps Pipeline & DefectDojo Integration
+
+All security workflows in `.github/workflows/` run on pushes and pull requests to
+`main`, via manual trigger (**Actions -> Run workflow**), and automatically every
+night on a cron schedule to catch newly disclosed CVEs in unchanged dependencies:
+
+| Workflow | Scanners | Schedule (UTC) | Report formats |
+| ----- | ----- | ----- | ----- |
+| `dependency-check.yml` | Trivy (repo, Python SCA, secrets, IaC) | `02:00` daily | SARIF, JSON |
+| `security.yml` | Bandit, Semgrep, Trivy (Docker images) | `02:30` daily | SARIF, JSON |
+| `zap.yml` | OWASP ZAP (Backend OpenAPI + Frontend) | `03:00` daily | HTML, JSON, XML |
+
+### Automatic upload from GitHub Actions (Hosted DefectDojo)
+
+Each workflow calls `scripts/upload_to_defectdojo.sh`, which posts scan reports
+to DefectDojo's `/api/v2/reimport-scan/` endpoint to deduplicate findings and
+automatically close resolved ones.
+
+To enable automatic ingestion from CI, configure these repository secrets in
+**GitHub -> Settings -> Secrets and variables -> Actions**:
+
+* `DEFECTDOJO_URL`: Base URL of your DefectDojo instance (e.g. `https://defectdojo.example.com`)
+
+* `DEFECTDOJO_API_KEY`: API v2 token generated in DefectDojo
+
+If these secrets are not set, the upload step is skipped cleanly without failing
+the pipeline.
+
+### Local DefectDojo demo (importing CI artifacts)
+
+Keep DefectDojo in a separate directory **outside** `Secure-BioVault` so Trivy
+does not scan third-party demo files as part of this repository.
+
+1. Move outside `Secure-BioVault`, clone DefectDojo, and start it:
+```sh
+cd ..
+git clone https://github.com/DefectDojo/django-DefectDojo.git
+cd django-DefectDojo
+./dc-up-d.sh postgres-redis
+```
+
+2. **From inside `django-DefectDojo/`** (not inside `Secure-BioVault/`), retrieve
+   the generated `admin` password after \~1 minute:
+```sh
+docker compose logs initializer | grep "Admin password:"
+```
+
+3. Open <http://localhost:8080>, log in as `admin`, then click
+   **admin (top-right) -> API v2 Key** and copy the token.
+
+4. Download the latest JSON/XML artifacts from GitHub **Actions** (open any
+   workflow run -> **Artifacts** at the bottom) and unzip them into a folder
+   such as `~/dd-reports`.
+
+5. Return to the `Secure-BioVault` repository root and import the reports with
+   the same script used by CI:
+```sh
+cd ../Secure-BioVault
+export DEFECTDOJO_URL="http://localhost:8080"
+export DEFECTDOJO_API_KEY="<your-api-v2-key>"
+
+bash scripts/upload_to_defectdojo.sh "Trivy Scan" ~/dd-reports/trivy-fs-results.json "Trivy Repo & Python SCA"
+bash scripts/upload_to_defectdojo.sh "Bandit Scan" ~/dd-reports/bandit-results.json "Bandit SAST"
+bash scripts/upload_to_defectdojo.sh "Semgrep JSON Report" ~/dd-reports/semgrep-results.json "Semgrep SAST"
+bash scripts/upload_to_defectdojo.sh "Trivy Scan" ~/dd-reports/trivy-backend-image.json "Trivy Container - Backend"
+bash scripts/upload_to_defectdojo.sh "Trivy Scan" ~/dd-reports/trivy-frontend-image.json "Trivy Container - Frontend"
+bash scripts/upload_to_defectdojo.sh "ZAP Scan" ~/dd-reports/backend_report.xml "OWASP ZAP - Backend API"
+bash scripts/upload_to_defectdojo.sh "ZAP Scan" ~/dd-reports/frontend_report.xml "OWASP ZAP - Frontend Web"
+```
+
+6. Refresh <http://localhost:8080> and open **Products -> Secure-BioVault** to
+   view the centralized findings dashboard.
