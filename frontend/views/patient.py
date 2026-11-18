@@ -23,6 +23,31 @@ def vault_page(embedded: bool = False, key_prefix: str = "vault"):
                 logout()
     if option_menu == "🔐 Mi Bóveda":
         st.title("🔐 Bóveda de Documentos")
+    # Admin file deletion pending notifications
+        try:
+            notices = api.get_deletion_notices(session)
+        except api.ApiError:
+            notices = []
+
+        for notice in notices:
+            with st.container(border=True):
+                c_msg, c_btn = st.columns([5, 1])
+                fecha = str(notice.get("created_at", ""))[:19].replace("T", " ")
+                c_msg.warning(
+                    f"**Documento eliminado por moderación:** `{notice['original_filename']}`\n\n"
+                    f"**Motivo:** {notice['reason']}\n\n"
+                    f"*Administrador: {notice['deleted_by_username']} · Fecha: {fecha} UTC*"
+                )
+                if c_btn.button(
+                    "OK",
+                    key=f"{key_prefix}_dismiss_{notice['notice_id']}",
+                    use_container_width=True,
+                ):
+                    try:
+                        api.dismiss_deletion_notice(session, notice["notice_id"])
+                        st.rerun()
+                    except api.ApiError as exc:
+                        handle_api_error(exc)
     # File upload section
         with st.expander("📤 Subir nuevo documento cifrado"):
             uploaded_file = st.file_uploader(

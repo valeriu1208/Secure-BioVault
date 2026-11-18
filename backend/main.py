@@ -826,6 +826,12 @@ def download(
     user: dict[str, Any] = Depends(current_user),
     connection: Connection[Any] = Depends(get_db_connection),
 ) -> Response:
+    if user["role_name"] == "ADMIN":
+        raise HTTPException(
+            status_code=403,
+            detail="Admins no pueden descargar fichero médicos"
+        )
+    
     record = connection.execute(
         """
         SELECT owner_id, content, encrypted_dek, iv_nonce
@@ -1180,23 +1186,32 @@ def list_professionals(
 def delete_file(
     request: Request,
     file_id: uuid.UUID,
+    reason: str | None = None,
     user: dict[str, Any] = Depends(current_user),
     connection: Connection[Any] = Depends(get_db_connection),
 ) -> None:
+    if user["role_name"] == "ADMIN" and (not reason or len(reason.strip()) < 10):
+        raise HTTPException(
+            status_code=400,
+            detail="El administrador debe justificar la eliminacion del fichero con al menos 10 caracteres",
+        )
+
     record = connection.execute(
-        "SELECT owner_id FROM files WHERE file_id = %s",
+        "SELECT owner_id, original_filename FROM files WHERE file_id = %s",
         (file_id,),
     ).fetchone()
     if record is None:
         raise HTTPException(status_code=404, detail="Documento no encontrado")
+
     authorize_file_access(
         request,
         user,
         "delete",
-        record["owner_id"],
+        file_id,
         connection,
         denial_status_code=404,
     )
+
     deleted = connection.execute(
         "DELETE FROM files WHERE file_id = %s AND owner_id = %s RETURNING file_id",
         (file_id, record["owner_id"]),
@@ -1204,6 +1219,77 @@ def delete_file(
     if deleted is None:
         raise HTTPException(status_code=404, detail="Documento no encontrado")
 
+    if user["role_name"] == "ADMIN":
+        clean_reason = reason.strip()
+        connection.execute(
+            """
+            INSERT INTO file_deletion_notices (
+                user_id, file_id, original_filename, deleted_by_id, deleted_by_username, reason
+            )
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (
+                record["owner_id"],
+                file_id,
+                record["original_filename"],
+                user["user_id"],
+                user["username"],
+                clean_reason,
+            ),
+        )
+        logger.warning(
+            "AUDIT_ADMIN_DELETE | admin=%s (%s) | file_id=%s | filename=%s | owner_id=%s | reason=%s",
+            user["username"],
+            user["user_id"],
+            file_id,
+            record["original_filename"],
+            record["owner_id"],
+            clean_reason,
+        )
+
+@app.get("/users/me/deletion-notices")
+def list_my_deletion_notices(
+    user: dict[str, Any] = Depends(current_user),
+    connection: Connection[Any] = Depends(get_db_connection),
+) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        """
+        SELECT notice_id, file_id, original_filename, deleted_by_username, reason, created_at
+        FROM file_deletion_notices
+        WHERE user_id = %s AND dismissed_at IS NULL
+        ORDER BY created_at DESC
+        """,
+        (user["user_id"],),
+    ).fetchall()
+    return [
+        {
+            "notice_id": str(r["notice_id"]),
+            "file_id": str(r["file_id"]),
+            "original_filename": r["original_filename"],
+            "deleted_by_username": r["deleted_by_username"],
+            "reason": r["reason"],
+            "created_at": r["created_at"].isoformat(),
+        }
+        for r in rows
+    ]
+
+@app.post("/users/me/deletion-notices/{notice_id}/dismiss", status_code=204)
+def dismiss_deletion_notice(
+    notice_id: uuid.UUID,
+    user: dict[str, Any] = Depends(current_user),
+    connection: Connection[Any] = Depends(get_db_connection),
+) -> None:
+    updated = connection.execute(
+        """
+        UPDATE file_deletion_notices
+        SET dismissed_at = NOW()
+        WHERE notice_id = %s AND user_id = %s AND dismissed_at IS NULL
+        RETURNING notice_id
+        """,
+        (notice_id, user["user_id"]),
+    ).fetchone()
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Notificación no encontrada")
 
 @app.post("/auth/revoke")
 def revoke(
@@ -1258,7 +1344,7 @@ def update_user_role(
         request,
         user,
         "change_role",
-        owner_id=target_user_id,
+        target_id=target_user_id,
         connection=connection,
         denial_status_code=403
     )
@@ -1280,6 +1366,25 @@ def update_user_role(
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
     return {"message": f"Rol actualizado a {body.new_role}"}
+
+# List files from users 
+@app.get("/admin/files")
+def list_all_files_metadata(
+    user: dict[str, Any] = Depends(current_user),
+    connection: Connection[Any] = Depends(get_db_connection),
+) -> list[dict[str, Any]]:
+    if user["role_name"] != "ADMIN":
+        raise HTTPException(status_code=403, detail="Requiere privilegios de administrador")
+
+    return connection.execute(
+        """
+        SELECT f.file_id, f.original_filename, f.description, f.file_type,
+               f.created_at, u.user_id AS owner_id, u.username AS owner_username
+        FROM files AS f
+        JOIN users AS u ON u.user_id = f.owner_id
+        ORDER BY f.created_at DESC
+        """
+    ).fetchall()
 
 
 @app.get("/doctor/patients")
@@ -1334,7 +1439,7 @@ def list_patient_files_for_doctor(
     for f in files:
         file_dict = dict(f)
         if user.get("role_name") == "ADMIN":
-            file_dict["has_access"] = True
+            file_dict["has_access"] = False
         else:
             try:
                 # Check with OPA if current user has read access
