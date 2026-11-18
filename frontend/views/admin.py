@@ -19,8 +19,14 @@ def admin_page():
         st.write("### 📌 Módulos")
         option_menu = st.radio(
             "Navegación Admin",
-            ["👥 Gestión de Usuarios", "📁 Control de Ficheros", "👨‍⚕️ Simular Vista Médico", "🔐 Simular Vista Bóveda"],
-            label_visibility="collapsed"
+            [
+                "👥 Gestión de Usuarios",
+                "📁 Control de Ficheros",
+                "📜 Logs de Auditoría",
+                "👨‍⚕️ Simular Vista Médico",
+                "🔐 Simular Vista Bóveda"
+            ],
+            label_visibility = "collapsed"
         )
         
         st.divider()
@@ -196,5 +202,71 @@ def admin_page():
                                         st.rerun()
                                     except api.ApiError as exc:
                                         handle_api_error(exc)
+        except api.ApiError as exc:
+            handle_api_error(exc)
+
+    elif option_menu == "📜 Logs de Auditoría":
+        st.title("📜 Auditoría Inmutable (HMAC-SHA256 Hash Chaining)")
+        st.caption(
+            "Cada registro encadena su HMAC-SHA256 con el registro anterior (prev_hash -> current_hash) "
+            "y la tabla está protegida como append-only."
+        )
+
+        col_btn, col_limit = st.columns([2, 1])
+        with col_limit:
+            limit = st.selectbox("Últimos registros", [50, 100, 250, 500], index = 1, key = "audit_limit")
+        with col_btn:
+            if st.button("🔍 Re-verificar integridad de la cadena", type = "primary"):
+                st.rerun()
+
+        try:
+            verification = api.verify_audit_logs(session)
+            if verification["valid"]:
+                st.success(
+                    f"✅ Integridad verificada: {verification['total_logs']} registros encadenados sin alteraciones."
+                )
+            else:
+                st.error(
+                    f"🚨 ¡MANIPULACIÓN DETECTADA en log_id #{verification['broken_at_log_id']}! "
+                    f"{verification['reason']}"
+                )
+
+            broken_id = None if verification["valid"] else verification.get("broken_at_log_id")
+            if broken_id is not None:
+                st.html(
+                    """
+                    <style>
+                    .st-key-tampered_audit_log {
+                        background-color: rgba(255, 75, 75, 0.20);
+                        border-color: rgba(255, 75, 75, 0.65) !important;
+                        border-radius: 0.5rem;
+                    }
+                    </style>
+                    """
+                )
+
+            logs = api.get_audit_logs(session, limit = limit)
+            if not logs:
+                st.info("Todavía no hay registros de auditoría.")
+            else:
+                for entry in logs:
+                    badge = "🟢" if entry["decision"] in ("ALLOWED", "APPROVED") else "🔴"
+                    actor = entry.get("username") or str(entry.get("user_id") or "anónimo")
+                    container_kwargs = {"border": True}
+                    if broken_id is not None and entry["log_id"] == broken_id:
+                        container_kwargs["key"] = "tampered_audit_log"
+
+                    with st.container(**container_kwargs):
+                        c1, c2 = st.columns([4, 2])
+                        c1.markdown(
+                            f"**#{entry['log_id']} · {badge} {entry['action']}** ({entry['decision']}) — `{actor}`"
+                        )
+                        if entry.get("reason"):
+                            c1.caption(f"Motivo: {entry['reason']} · IP: {entry.get('ip_address', '-')}")
+                        c2.caption(f"🕒 {entry['timestamp']}")
+                        c2.code(
+                            f"prev: {entry['prev_hash'][:12]}...\ncurr: {entry['current_hash'][:12]}...",
+                            language = None,
+                        )
         except api.ApiError as exc:
             handle_api_error(exc)
