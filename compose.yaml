@@ -75,6 +75,7 @@ services:
       - ./database/migrations/001_persistent_api.sql:/migrations/001_persistent_api.sql:ro
       - ./database/migrations/002_stateless_access_tokens.sql:/migrations/002_stateless_access_tokens.sql:ro
       - ./database/migrations/003_mfa_columns.sql:/migrations/003_mfa_columns.sql:ro
+      - ./database/migrations/004_file_role_permissions.sql:/migrations/004_file_role_permissions.sql:ro
     command:
       - psql
       - -v
@@ -85,6 +86,8 @@ services:
       - /migrations/002_stateless_access_tokens.sql
       - -f
       - /migrations/003_mfa_columns.sql
+      - -f
+      - /migrations/004_file_role_permissions.sql
 
   db:
     image: postgres:16.4-alpine

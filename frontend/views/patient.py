@@ -93,11 +93,16 @@ def vault_page(embedded: bool = False, key_prefix: str = "vault"):
     elif option_menu == "⚕️ Compartir Datos":
         st.title("⚕️ Gestión de Permisos y Accesos")
         
-        tab_requests, tab_grant, tab_permissions = st.tabs(
-            ["📥 Solicitudes Pendientes", "➕ Conceder Acceso Directo", "🔑 Permisos Activos"]
+        tab_requests, tab_grant_user, tab_grant_role, tab_permissions = st.tabs(
+            [
+                "📥 Solicitudes Pendientes",
+                "👤 Conceder Acceso a un Usuario",
+                "👥 Conceder Acceso a un Rol",
+                "🔑 Permisos Activos"
+            ]
         )
 
-        # Accept/Deny requests from doctors/researchers
+        # 1. Accept/Deny requests from doctors/researchers
         with tab_requests:
             st.subheader("Solicitudes de acceso recibidas")
             try:
@@ -128,9 +133,9 @@ def vault_page(embedded: bool = False, key_prefix: str = "vault"):
             except api.ApiError as exc:
                 handle_api_error(exc)
 
-        # Grant access directly without needing a previous request
-        with tab_grant:
-            st.subheader("Otorgar acceso voluntario a un Profesional")
+        # 2. Grant access directly to a specific professional without needing a previous request
+        with tab_grant_user:
+            st.subheader("Otorgar acceso a un Usuario")
             try:
                 user_files = api.list_files(session)
                 professionals = api.list_professionals(session)
@@ -144,7 +149,7 @@ def vault_page(embedded: bool = False, key_prefix: str = "vault"):
                         "Selecciona el fichero:",
                         options=user_files,
                         format_func=lambda f: f.get("filename") or str(f.get("id") or f.get("file_id")),
-                        key=f"{key_prefix}_grant_file_select",
+                        key=f"{key_prefix}_grant_user_file_select",
                     )
 
                     selected_prof = st.selectbox(
@@ -154,7 +159,7 @@ def vault_page(embedded: bool = False, key_prefix: str = "vault"):
                         key=f"{key_prefix}_grant_prof_select",
                     )
 
-                    if st.button("🔑 Otorgar Permiso Directo", type="primary", key=f"{key_prefix}_btn_grant"):
+                    if st.button("🔑 Otorgar Permiso al Usuario", type="primary", key=f"{key_prefix}_btn_grant_user"):
                         fid = str(selected_file.get("file_id") or selected_file.get("id"))
                         target_id = str(selected_prof["user_id"])
                         api.grant_file_access(session, file_id=fid, target_user_id=target_id)
@@ -162,6 +167,41 @@ def vault_page(embedded: bool = False, key_prefix: str = "vault"):
             except api.ApiError as exc:
                 handle_api_error(exc)
 
+        # 3. Grant access directly to an entire role
+        with tab_grant_role:
+            st.subheader("Otorgar acceso a un Rol")
+            try:
+                user_files = api.list_files(session)
+
+                if not user_files:
+                    st.info("Sube al menos un fichero a tu bóveda para poder otorgar permisos.")
+                else:
+                    selected_file_role = st.selectbox(
+                        "Selecciona el fichero:",
+                        options=user_files,
+                        format_func=lambda f: f.get("filename") or str(f.get("id") or f.get("file_id")),
+                        key=f"{key_prefix}_grant_role_file_select",
+                    )
+
+                    role_labels = {
+                        "DOCTOR": "👨‍⚕️ Todos los Médicos (DOCTOR)",
+                        "RESEARCHER": "🔬 Todos los Investigadores (RESEARCHER)",
+                    }
+                    selected_role = st.selectbox(
+                        "Selecciona el rol:",
+                        options=["DOCTOR", "RESEARCHER"],
+                        format_func=lambda r: role_labels[r],
+                        key=f"{key_prefix}_grant_role_select",
+                    )
+
+                    if st.button("🔑 Otorgar Permiso al Rol", type="primary", key=f"{key_prefix}_btn_grant_role"):
+                        fid = str(selected_file_role.get("file_id") or selected_file_role.get("id"))
+                        api.grant_file_role_access(session, file_id=fid, role_name=selected_role)
+                        st.success(f"Permiso concedido al Rol {selected_role}.")
+            except api.ApiError as exc:
+                handle_api_error(exc)
+
+        # 4. List and revoke active permissions (both role-based and user-based)s
         with tab_permissions:
             st.subheader("Permisos concedidos por fichero")
             try:
@@ -176,28 +216,50 @@ def vault_page(embedded: bool = False, key_prefix: str = "vault"):
                         key=f"{key_prefix}_permission_file_select",
                     )
                     file_id = str(selected_file.get("file_id") or selected_file.get("id"))
-                    permissions = api.list_file_permissions(session, file_id)
-                    if not permissions:
+                    role_permissions = api.list_file_role_permissions(session, file_id)
+                    user_permissions = api.list_file_permissions(session, file_id)
+                    if not role_permissions and not user_permissions:
                         st.info("Este fichero no tiene permisos compartidos.")
                     else:
-                        for permission in permissions:
-                            target_user_id = str(permission["user_id"])
-                            with st.container(border=True):
-                                col_info, col_action = st.columns([4, 1])
-                                col_info.markdown(
-                                    f"**{permission['username']}** ({permission['role_name']})"
-                                )
-                                if col_action.button(
-                                    "Revocar",
-                                    key=f"{key_prefix}_revoke_{file_id}_{target_user_id}",
-                                    type="secondary",
-                                ):
-                                    try:
-                                        api.revoke_file_access(session, file_id, target_user_id)
-                                        st.success("Permiso revocado.")
-                                        st.rerun()
-                                    except api.ApiError as exc:
-                                        handle_api_error(exc)
+                        if role_permissions:
+                            st.markdown("##### 👥 Permisos por rol")
+                            for rp in role_permissions:
+                                role_name = rp["role_name"]
+                                with st.container(border=True):
+                                    col_info, col_action = st.columns([4, 1])
+                                    col_info.markdown(f"**Rol completo:** `{role_name}`")
+                                    if col_action.button(
+                                        "Revocar",
+                                        key=f"{key_prefix}_revoke_role_{file_id}_{role_name}",
+                                        type="secondary",
+                                    ):
+                                        try:
+                                            api.revoke_file_role_access(session, file_id, role_name)
+                                            st.success(f"Permiso revocado para el rol {role_name}.")
+                                            st.rerun()
+                                        except api.ApiError as exc:
+                                            handle_api_error(exc)
+
+                        if user_permissions:
+                            st.markdown("##### 👤 Permisos individuales")
+                            for permission in user_permissions:
+                                target_user_id = str(permission["user_id"])
+                                with st.container(border=True):
+                                    col_info, col_action = st.columns([4, 1])
+                                    col_info.markdown(
+                                        f"**{permission['username']}** ({permission['role_name']})"
+                                    )
+                                    if col_action.button(
+                                        "Revocar",
+                                        key=f"{key_prefix}_revoke_{file_id}_{target_user_id}",
+                                        type="secondary",
+                                    ):
+                                        try:
+                                            api.revoke_file_access(session, file_id, target_user_id)
+                                            st.success("Permiso revocado.")
+                                            st.rerun()
+                                        except api.ApiError as exc:
+                                            handle_api_error(exc)
             except api.ApiError as exc:
                 handle_api_error(exc)
 

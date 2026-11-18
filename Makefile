@@ -8,9 +8,10 @@ key:
 	python3 -c "import base64, secrets; print('POSTGRES_PASSWORD=' + secrets.token_hex(24)); print('FILE_ENCRYPTION_KEY=' + base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())" >> .env
 	python3 -c "import base64, secrets; print('FIELD_ENCRYPTION_KEY=' + base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())" >> .env
 	mkdir -p secrets
+	chmod 700 secrets
 	openssl genpkey -algorithm Ed25519 -out secrets/jwt_private.pem
 	openssl pkey -in secrets/jwt_private.pem -pubout -out secrets/jwt_public.pem
-	chmod 600 secrets/jwt_private.pem
+	chmod 644 secrets/jwt_private.pem
 
 tls:
 	./scripts/gen-tls-cert.sh
