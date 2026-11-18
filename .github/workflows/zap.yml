@@ -5,6 +5,9 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  schedule: # 3:00 UTC daily (continuous DAST regression checks)
+    - cron: '0 3 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -87,9 +90,10 @@ jobs:
         env:
           DYNAMIC_TOKEN: ${{ env.DYNAMIC_TOKEN }}
         run: |
-          # Create placeholder report files and make them world-writable
-          touch backend_report.json backend_report.html frontend_report.json frontend_report.html
-          chmod 777 backend_report.json backend_report.html frontend_report.json frontend_report.html
+          # Create placeholder report files writable by the ZAP container user
+          touch backend_report.json backend_report.html backend_report.xml \
+                frontend_report.json frontend_report.html frontend_report.xml
+          chmod 666 backend_report.* frontend_report.*
 
           echo "Starting Backend OpenAPI Scan..."
           docker run --net=host -v $(pwd):/zap/wrk/:rw \
@@ -97,6 +101,7 @@ jobs:
             -t https://localhost:8443/openapi.json \
             -f openapi \
             -J backend_report.json \
+            -x backend_report.xml \
             -r backend_report.html \
             -I \
             -z "-config replacer.full_list\(0\).description=Auth \
@@ -104,7 +109,7 @@ jobs:
                -config replacer.full_list\(0\).matchtype=req_header \
                -config replacer.full_list\(0\).matchstr=Authorization \
                -config replacer.full_list\(0\).regex=false \
-               -config replacer.full_list\(0\).replacement=\"Bearer $DYNAMIC_TOKEN\"" 
+               -config replacer.full_list\(0\).replacement=\"Bearer $DYNAMIC_TOKEN\""
 
           echo "Starting Streamlit Frontend Scan..."
           docker run --net=host -v $(pwd):/zap/wrk/:rw \
@@ -112,6 +117,7 @@ jobs:
             -t https://localhost \
             -j \
             -J frontend_report.json \
+            -x frontend_report.xml \
             -r frontend_report.html \
             -I \
             -z "-config replacer.full_list\(0\).description=Auth \
@@ -145,8 +151,8 @@ jobs:
             exit 0
           fi
 
-      # 7. Upload both artifacts
-      - name: Upload DAST HTML Reports
+      # 7. Upload DAST reports (HTML for humans + XML for DefectDojo)
+      - name: Upload DAST Reports
         uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -154,3 +160,22 @@ jobs:
           path: |
             backend_report.html
             frontend_report.html
+            backend_report.xml
+            frontend_report.xml
+          retention-days: 7
+
+      # 8. Centralize DAST findings in DefectDojo (when secrets are configured)
+      - name: Upload ZAP Reports to DefectDojo
+        if: always()
+        env:
+          DEFECTDOJO_URL: ${{ secrets.DEFECTDOJO_URL }}
+          DEFECTDOJO_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
+        run: |
+          bash scripts/upload_to_defectdojo.sh \
+            "ZAP Scan" \
+            "backend_report.xml" \
+            "OWASP ZAP - Backend API"
+          bash scripts/upload_to_defectdojo.sh \
+            "ZAP Scan" \
+            "frontend_report.xml" \
+            "OWASP ZAP - Frontend Web"
