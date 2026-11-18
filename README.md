@@ -84,7 +84,7 @@ its password, set a new one with `make fix_password` (it prints the SQL to run).
 Stop the services with `Ctrl+C`, or `docker compose down` in another terminal.
 Data persists in the `postgres_api_data` volume.
 
-### Updating an existing setup
+### 4. Updating an existing setup
 
 After pulling changes, always restart with a rebuild:
 
@@ -107,7 +107,7 @@ docker compose run --rm db-migrate
 
 The `NOTICE: ... already exists, skipping` lines in its output are normal.
 
-### Troubleshooting
+### 5. Troubleshooting
 
 **`column ... does not exist` / `relation ... does not exist` (500 errors).**
 The database was created before that column or table was added, and the
@@ -153,7 +153,7 @@ To inspect the database directly:
 docker compose exec db psql -U biovault_user -d biovault_db
 ```
 
-## Security overview
+## 6. Security overview
 
 Passwords are stored as Argon2id hashes. Uploaded PDFs use
 AES-256-GCM envelope encryption: each file gets a random data-encryption key,
@@ -162,7 +162,7 @@ are evaluated by OPA. The initial policy allows owners and denies other users;
 OPA failures fail closed. Update `policies/biovault.rego` and, when a rule needs
 additional attributes, the OPA input in `backend/main.py` to add future rules.
 
-## Authentication: OAuth 2.0 / OpenID Connect tokens with asymmetric JWTs
+## 7. Authentication: OAuth 2.0 / OpenID Connect tokens with asymmetric JWTs
 
 The first-party Streamlit frontend signs in at `POST /auth/token` with the
 OAuth 2.0 password grant (username, password and mandatory TOTP code).
@@ -197,14 +197,14 @@ first-party client of the same system.
 
 After upgrading, sign in again: migration `002` drops the old sessions.
 
-## Mock backend
+## 8. Mock backend
 
 For UI-only testing, run `docker compose -f compose.mock.yaml up --build`.
 The mock backend stores users and files in memory and does not provide real
 authentication, encryption, or PostgreSQL persistence. Do not use real
 passwords or sensitive documents with it.
 
-## Run locally
+## 9. Run locally
 
 For local development, start PostgreSQL and OPA with
 `docker compose up -d db opa`.

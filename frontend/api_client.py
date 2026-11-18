@@ -185,6 +185,15 @@ def list_file_permissions(session: Session, file_id: str) -> list[dict]:
 def revoke_file_access(session: Session, file_id: str, target_user_id: str) -> None:
     _request("DELETE", f"/files/{file_id}/permissions/{target_user_id}", session)
 
+def grant_file_role_access(session: Session, file_id: str, role_name: str) -> dict:
+    return _request("POST", f"/files/{file_id}/role-permissions", session, json = {"role_name": role_name}).json()
+
+def list_file_role_permissions(session: Session, file_id: str) -> list[dict]:
+    return _request("GET", f"/files/{file_id}/role-permissions", session).json()
+
+def revoke_file_role_access(session: Session, file_id: str, role_name: str) -> None:
+    _request("DELETE", f"/files/{file_id}/role-permissions/{role_name}", session)
+
 def list_professionals(session: Session) -> list[dict]:
     return _request("GET", "/users/professionals", session).json()
 

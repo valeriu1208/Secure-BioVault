@@ -164,6 +164,9 @@ class FileAccessRequestIn(BaseModel):
 class GrantFileAccessIn(BaseModel):
     target_user_id: uuid.UUID
 
+class GrantFileRoleAccessIn(BaseModel):
+    role_name: str = Field(pattern="^(DOCTOR|RESEARCHER)$")
+
 class RequestStatusUpdate(BaseModel):
     status: str  # "APPROVED" o "DENIED"
 
@@ -345,18 +348,25 @@ def authorize_file_access(
         file_id = str(file_record["file_id"])
         owner_id = str(file_record["owner_id"])
 
-        # Explicit permissions for this specific file
+        # Explicit user permissions for this specific file
         file_perms = connection.execute(
             "SELECT user_id FROM file_permissions WHERE file_id = %s", (target_id,)
         ).fetchall()
         for fp in file_perms:
             allowed_users.append(str(fp["user_id"]))
+
+        # Explicit role permissions for this specific file
+        role_perms = connection.execute(
+            "SELECT role_name FROM file_role_permissions WHERE file_id = %s", (target_id,)
+        ).fetchall()
+        for rp in role_perms:
+            allowed_roles.append(str(rp["role_name"]))
     else:
         # target_id is a patient_id (owner_id)
         file_id = None
         owner_id = str(target_id)
 
-        # All permissions of the patients files
+        # All user permissions of the patients files
         file_perms = connection.execute(
             """
             SELECT DISTINCT fp.user_id
@@ -368,6 +378,19 @@ def authorize_file_access(
         ).fetchall()
         for fp in file_perms:
             allowed_users.append(str(fp["user_id"]))
+
+        # All role permissions of the patients files
+        role_perms = connection.execute(
+            """
+            SELECT DISTINCT frp.role_name
+            FROM file_role_permissions frp
+            JOIN files f ON f.file_id = frp.file_id
+            WHERE f.owner_id = %s
+            """,
+            (target_id,)
+        ).fetchall()
+        for rp in role_perms:
+            allowed_roles.append(str(rp["role_name"]))
 
     consents = connection.execute(
         """
@@ -383,6 +406,10 @@ def authorize_file_access(
             allowed_users.append(str(c["granted_to_user_id"]))
         if c["granted_to_role"]:
             allowed_roles.append(c["granted_to_role"])
+
+    # avoid duplicates
+    allowed_users = list(set(allowed_users))
+    allowed_roles = list(set(allowed_roles))
 
     input_document = {
         "input": {
@@ -1026,7 +1053,114 @@ def revoke_file_access(
         raise HTTPException(status_code=404, detail="Permiso no encontrado o ya revocado")
 
 
-# List Doctor / Researcher  to grant direct permission
+@app.post("/files/{file_id}/role-permissions", status_code=201)
+def grant_file_role_access(
+    request: Request,
+    file_id: uuid.UUID,
+    payload: GrantFileRoleAccessIn,
+    user: dict[str, Any] = Depends(current_user),
+    connection: Connection[Any] = Depends(get_db_connection),
+) -> dict[str, str]:
+    file_record = connection.execute(
+        "SELECT owner_id FROM files WHERE file_id = %s", (file_id,)
+    ).fetchone()
+    if not file_record:
+        raise HTTPException(status_code = 404, detail = "Fichero no encontrado")
+
+    authorize_file_access(
+        request,
+        user,
+        "write",
+        file_record["owner_id"],
+        connection,
+    )
+
+    connection.execute(
+        """
+        INSERT INTO file_role_permissions (file_id, role_name)
+        VALUES (%s, %s)
+        ON CONFLICT DO NOTHING
+        """,
+        (file_id, payload.role_name),
+    )
+    return {"message": f"Permiso concedido al rol {payload.role_name}"}
+
+
+@app.get("/files/{file_id}/role-permissions")
+def list_file_role_permissions(
+    request: Request,
+    file_id: uuid.UUID,
+    user: dict[str, Any] = Depends(current_user),
+    connection: Connection[Any] = Depends(get_db_connection),
+) -> list[dict[str, Any]]:
+    file_record = connection.execute(
+        "SELECT owner_id FROM files WHERE file_id = %s",
+        (file_id,),
+    ).fetchone()
+    if file_record is None:
+        raise HTTPException(status_code = 404, detail = "Documento no encontrado")
+
+    authorize_file_access(
+        request,
+        user,
+        "write",
+        file_record["owner_id"],
+        connection,
+        denial_status_code = 404,
+    )
+
+    return connection.execute(
+        """
+        SELECT role_name, created_at
+        FROM file_role_permissions
+        WHERE file_id = %s
+        ORDER BY role_name
+        """,
+        (file_id,),
+    ).fetchall()
+
+
+@app.delete("/files/{file_id}/role-permissions/{role_name}", status_code = 204)
+def revoke_file_role_access(
+    request: Request,
+    file_id: uuid.UUID,
+    role_name: str,
+    user: dict[str, Any] = Depends(current_user),
+    connection: Connection[Any] = Depends(get_db_connection),
+) -> None:
+    role_name = role_name.upper()
+    if normalized_role not in ("DOCTOR", "RESEARCHER"):
+        raise HTTPException(status_code = 400, detail = "Rol no válido")
+
+    file_record = connection.execute(
+        "SELECT owner_id FROM files WHERE file_id = %s",
+        (file_id,),
+    ).fetchone()
+    if file_record is None:
+        raise HTTPException(status_code = 404, detail = "Documento no encontrado")
+
+    authorize_file_access(
+        request,
+        user,
+        "write",
+        file_record["owner_id"],
+        connection,
+        denial_status_code = 404,
+    )
+
+    deleted = connection.execute(
+        """
+        DELETE FROM file_role_permissions
+        WHERE file_id = %s AND role_name = %s
+        RETURNING permission_id
+        """,
+        (file_id, normalized_role),
+    ).fetchone()
+    if deleted is None:
+        raise HTTPException(status_code = 404, detail = "Permiso de rol no encontrado o ya revocado")
+
+
+# List Doctor/Researcher to grant direct permission
 @app.get("/users/professionals")
 def list_professionals(
     user: dict[str, Any] = Depends(current_user),
