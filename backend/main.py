@@ -1,6 +1,7 @@
 import base64
 import binascii
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -39,7 +40,9 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 password_hash = PasswordHash.recommended()
 oauth2 = OAuth2PasswordBearer(tokenUrl="/auth/token")
-MAX_FILE_SIZE = 25 * 1024 * 1024
+
+MAX_FILE_SIZE = 25*1024*1024
+
 # Access tokens are verified statelessly (signature + claims only), so they are
 # kept short-lived: revocation (logout, deactivation, role change) takes effect
 # at most ACCESS_TOKEN_LIFETIME later. Refresh tokens are opaque, stored hashed
@@ -51,7 +54,10 @@ JWT_ISSUER = os.environ.get("OIDC_ISSUER", "http://localhost:8000").rstrip("/")
 OIDC_CLIENT_ID = "biovault-frontend"  # audience of ID tokens (first-party Streamlit client)
 JWT_AUDIENCE = "secure-biovault-api"
 JWT_KEY_ID = "ed25519-v1"
+
 OPA_DECISION_PATH = "/v1/data/biovault/authz/allow"
+
+AUDIT_GENESIS_HASH = "0"*64
 
 
 def load_encryption_key() -> bytes:
@@ -103,6 +109,15 @@ def load_jwt_keys() -> tuple[Ed25519PrivateKey, Ed25519PublicKey]:
     return private_key, public_key
 
 
+# Derivates a dedicated domain-separated HMAC key for audit log chaining
+def derive_audit_hmac_key(field_encryption_key: bytes) -> bytes:
+    return hmac.digest(
+        field_encryption_key,
+        b"secure-biovault:audit-log-hmac:v1",
+        "sha256",
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     database_url = os.environ.get("DATABASE_URL")
@@ -111,15 +126,25 @@ async def lifespan(app: FastAPI):
 
     app.state.file_encryption_key = load_encryption_key()
     app.state.field_encryption_key = load_field_encryption_key()
+    app.state.audit_hmac_key = derive_audit_hmac_key(app.state.field_encryption_key)
     app.state.jwt_private_key, app.state.jwt_public_key = load_jwt_keys()
     app.state.opa_url = os.environ.get("OPA_URL", "http://localhost:8181").rstrip("/")
-    with ConnectionPool(
-        conninfo=database_url,
-        min_size=1,
-        max_size=10,
-        kwargs={"row_factory": dict_row},
-    ) as pool:
+    with (
+        ConnectionPool(
+            conninfo = database_url,
+            min_size = 1,
+            max_size = 10,
+            kwargs = {"row_factory": dict_row},
+        ) as pool,
+        ConnectionPool(
+            conninfo = database_url,
+            min_size = 1,
+            max_size = 4,
+            kwargs = {"row_factory": dict_row},
+        ) as audit_pool,
+    ):
         app.state.db_pool = pool
+        app.state.audit_db_pool = audit_pool
         yield
 
 
@@ -336,6 +361,7 @@ def authorize_file_access(
     connection: Connection[Any],
     *,
     denial_status_code: int = 403,
+    audit: bool = True,
 ) -> None:
     allowed_users = []
     allowed_roles = []
@@ -444,10 +470,20 @@ def authorize_file_access(
     if not isinstance(allow, bool):
         logger.error("OPA returned an invalid authorization decision")
         raise HTTPException(status_code=503, detail="Authorization service unavailable")
+    if audit:
+        audit_action = "ROLE_CHANGE" if action == "change_role" else f"FILE_{action.upper()}"
+        record_audit_log(
+            request,
+            user_id = user["user_id"],
+            action = audit_action,
+            resource_id = target_id,
+            decision = "ALLOWED" if allow else "DENIED",
+            reason = f"OPA decision for role = {user['role_name']}",
+        )
     if not allow:
         raise HTTPException(
-            status_code=denial_status_code,
-            detail="No autorizado para acceder a este documento",
+            status_code = denial_status_code,
+            detail = "No autorizado para acceder a este documento",
         )
 
 
@@ -490,6 +526,138 @@ def decrypt_field(enc_text: str, key: bytes) -> str:
         return AESGCM(key).decrypt(nonce, ciphertext, None).decode("utf-8")
     except Exception:
         return "[DATOS CORRUPTOS]"
+
+
+def get_client_ip(request: Request) -> str:
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()[:45]
+    if request.client and request.client.host:
+        return request.client.host[:45]
+    return "unknown"
+
+
+# Computes a deterministic HMAC-SHA256 linking an audit record to prev_hash
+def compute_log_hash(
+    *,
+    hmac_key: bytes,
+    prev_hash: str,
+    user_id: uuid.UUID | str | None,
+    action: str,
+    resource_id: uuid.UUID | str | None,
+    decision: str,
+    reason: str | None,
+    ip_address: str | None,
+    timestamp: datetime,
+) -> str:
+    canonical_payload = {
+        "prev_hash": prev_hash,
+        "user_id": str(user_id) if user_id is not None else None,
+        "action": action,
+        "resource_id": str(resource_id) if resource_id is not None else None,
+        "decision": decision,
+        "reason": reason,
+        "ip_address": ip_address,
+        "timestamp": timestamp.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+    }
+    encoded = json.dumps(canonical_payload, sort_keys = True, separators = (",", ":")).encode("utf-8")
+    return hmac.new(hmac_key, encoded, hashlib.sha256).hexdigest()
+
+
+# Appends a tamper-evident entry to access_logs in a serialized transaction
+def record_audit_log(
+    request: Request,
+    *,
+    action: str,
+    decision: str,
+    user_id: uuid.UUID | None = None,
+    resource_id: uuid.UUID | None = None,
+    reason: str | None = None,
+) -> None:
+    ip_address = get_client_ip(request)
+    ts = datetime.now(timezone.utc)
+    truncated_reason = reason[:255] if reason else None
+    audit_pool: ConnectionPool = request.app.state.audit_db_pool
+    hmac_key: bytes = request.app.state.audit_hmac_key
+
+    with audit_pool.connection() as audit_conn:
+        with audit_conn.transaction():
+            # Serialize concurrent writes natively without any external lock key while EXCLUSIVE allows concurrent SELECTs while blocking concurrent INSERTs
+            audit_conn.execute("LOCK TABLE access_logs IN EXCLUSIVE MODE")
+            last_row = audit_conn.execute(
+                "SELECT current_hash FROM access_logs ORDER BY log_id DESC LIMIT 1"
+            ).fetchone()
+            prev_hash = last_row["current_hash"] if last_row else AUDIT_GENESIS_HASH
+            current_hash = compute_log_hash(
+                hmac_key = hmac_key,
+                prev_hash = prev_hash,
+                user_id = user_id,
+                action = action,
+                resource_id = resource_id,
+                decision = decision,
+                reason = truncated_reason,
+                ip_address = ip_address,
+                timestamp = ts,
+            )
+            audit_conn.execute(
+                """
+                INSERT INTO access_logs (
+                    user_id, action, resource_id, decision, reason, ip_address, timestamp,
+                    prev_hash, current_hash
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    user_id,
+                    action,
+                    resource_id,
+                    decision,
+                    truncated_reason,
+                    ip_address,
+                    ts,
+                    prev_hash,
+                    current_hash,
+                ),
+            )
+
+
+# Verifies hash-chain continuity and HMAC-SHA256 integrity across ordered access_logs
+def verify_audit_chain(rows: list[dict[str, Any]], hmac_key: bytes) -> dict[str, Any]:
+    expected_prev_hash = AUDIT_GENESIS_HASH
+    for row in rows:
+        if not hmac.compare_digest(row["prev_hash"], expected_prev_hash):
+            return {
+                "valid": False,
+                "total_logs": len(rows),
+                "broken_at_log_id": row["log_id"],
+                "reason": "Broken chain link: prev_hash does not match previous record (deleted or reordered row)",
+            }
+        expected_hash = compute_log_hash(
+            hmac_key = hmac_key,
+            prev_hash = row["prev_hash"],
+            user_id = row["user_id"],
+            action = row["action"],
+            resource_id = row["resource_id"],
+            decision = row["decision"],
+            reason = row["reason"],
+            ip_address = row["ip_address"],
+            timestamp = row["timestamp"],
+        )
+        if not hmac.compare_digest(row["current_hash"], expected_hash):
+            return {
+                "valid": False,
+                "total_logs": len(rows),
+                "broken_at_log_id": row["log_id"],
+                "reason": "Tampered record: recomputed HMAC-SHA256 does not match stored current_hash",
+            }
+        expected_prev_hash = row["current_hash"]
+
+    return {
+        "valid": True,
+        "total_logs": len(rows),
+        "broken_at_log_id": None,
+        "reason": "Audit log hash chain is intact",
+    }
 
 
 # Creates hash for DB lookup (via user email)
@@ -628,6 +796,13 @@ def token(
         ).fetchone()
 
         if user is None or not password_hash.verify(password, user["password_hash"]):
+            record_audit_log(
+                request,
+                user_id = user["user_id"] if user else None,
+                action = "LOGIN_ATTEMPT",
+                decision = "DENIED",
+                reason = f"Invalid credentials for username = {username}",
+            )
             return oauth_error("invalid_grant", "Credenciales incorrectas")
 
         key = request.app.state.field_encryption_key
@@ -652,7 +827,7 @@ def token(
                 )
                 return JSONResponse(
                     status_code=403,
-                    content={
+                    content = {
                         "error": "mfa_setup_required",
                         "error_description": "Scan the QR code and send totp_code",
                         "code": "MFA_SETUP_REQUIRED",
@@ -662,7 +837,14 @@ def token(
                 )
 
             # QR scanned, send 6 digit code, verify and activate MFA
-            if not pyotp.TOTP(secret).verify(totp_code.strip(), valid_window=1):
+            if not pyotp.TOTP(secret).verify(totp_code.strip(), valid_window = 1):
+                record_audit_log(
+                    request,
+                    user_id = user["user_id"],
+                    action = "LOGIN_ATTEMPT",
+                    decision = "DENIED",
+                    reason = "Invalid TOTP code",
+                )
                 return oauth_error("invalid_grant", "Código de verificación inválido")
 
             connection.execute(
@@ -674,8 +856,8 @@ def token(
         else:
             if not totp_code:
                 return JSONResponse(
-                    status_code=403,
-                    content={
+                    status_code = 403,
+                    content = {
                         "error": "mfa_required",
                         "error_description": "Send totp_code from the authenticator app",
                         "code": "MFA_REQUIRED",
@@ -684,6 +866,13 @@ def token(
 
             secret = decrypt_field(user["totp_secret"], key)
             if not pyotp.TOTP(secret).verify(totp_code.strip(), valid_window=1):
+                record_audit_log(
+                    request,
+                    user_id = user["user_id"],
+                    action = "LOGIN_ATTEMPT",
+                    decision = "DENIED",
+                    reason = "Invalid TOTP code",
+                )
                 return oauth_error("invalid_grant", "Código de verificación incorrecto o caducado")
 
         
@@ -696,6 +885,13 @@ def token(
         )
     tokens["id_token"] = issue_id_token(
         user["user_id"], user["username"], request.app.state.jwt_private_key, nonce
+    )
+    record_audit_log(
+        request,
+        user_id = user["user_id"],
+        action = "LOGIN_ATTEMPT",
+        decision = "ALLOWED",
+        reason = "Password and TOTP verified",
     )
     return tokens
 
@@ -827,6 +1023,14 @@ def download(
     connection: Connection[Any] = Depends(get_db_connection),
 ) -> Response:
     if user["role_name"] == "ADMIN":
+        record_audit_log(
+            request,
+            user_id = user["user_id"],
+            action = "FILE_READ",
+            resource_id = file_id,
+            decision = "DENIED",
+            reason = "Admins are not allowed to download medical files",
+        )
         raise HTTPException(
             status_code=403,
             detail="Admins no pueden descargar fichero médicos"
@@ -865,6 +1069,14 @@ def download(
         )
     except (InvalidTag, ValueError, binascii.Error) as exc:
         logger.exception("Stored file integrity check failed for %s", file_id)
+        record_audit_log(
+            request,
+            user_id = user["user_id"],
+            action = "FILE_READ",
+            resource_id = file_id,
+            decision = "DENIED",
+            reason = "Stored file integrity check failed",
+        )
         raise HTTPException(status_code=500, detail="Stored file integrity check failed") from exc
     return Response(content, media_type="application/pdf")
 
@@ -1004,6 +1216,14 @@ def grant_file_access(
         """,
         (file_id, payload.target_user_id),
     )
+    record_audit_log(
+        request,
+        user_id = user["user_id"],
+        action = "PERMISSION_GRANT",
+        resource_id = file_id,
+        decision = "ALLOWED",
+        reason = f"Granted to user {payload.target_user_id}"
+    )
     return {"message": "Permiso concedido exitosamente"}
 
 
@@ -1035,6 +1255,7 @@ def list_file_permissions(
 
 @app.delete("/files/{file_id}/permissions/{target_user_id}", status_code=204)
 def revoke_file_access(
+    request: Request,
     file_id: uuid.UUID,
     target_user_id: uuid.UUID,
     user: dict[str, Any] = Depends(current_user),
@@ -1057,6 +1278,15 @@ def revoke_file_access(
     ).fetchone()
     if deleted is None:
         raise HTTPException(status_code=404, detail="Permiso no encontrado o ya revocado")
+
+    record_audit_log(
+        request,
+        user_id = user["user_id"],
+        action = "PERMISSION_REVOKE",
+        resource_id = file_id,
+        decision = "ALLOWED",
+        reason = f"Revoked from user {target_user_id}"
+    )
 
 
 @app.post("/files/{file_id}/role-permissions", status_code=201)
@@ -1088,6 +1318,14 @@ def grant_file_role_access(
         ON CONFLICT DO NOTHING
         """,
         (file_id, payload.role_name),
+    )
+    record_audit_log(
+        request,
+        user_id = user["user_id"],
+        action = "ROLE_PERMISSION_GRANT",
+        resource_id = file_id,
+        decision = "ALLOWED",
+        reason = f"Granted to role {payload.role_name}"
     )
     return {"message": f"Permiso concedido al rol {payload.role_name}"}
 
@@ -1135,7 +1373,7 @@ def revoke_file_role_access(
     connection: Connection[Any] = Depends(get_db_connection),
 ) -> None:
     role_name = role_name.upper()
-    if normalized_role not in ("DOCTOR", "RESEARCHER"):
+    if role_name not in ("DOCTOR", "RESEARCHER"):
         raise HTTPException(status_code = 400, detail = "Rol no válido")
 
     file_record = connection.execute(
@@ -1160,10 +1398,19 @@ def revoke_file_role_access(
         WHERE file_id = %s AND role_name = %s
         RETURNING permission_id
         """,
-        (file_id, normalized_role),
+        (file_id, role_name),
     ).fetchone()
     if deleted is None:
         raise HTTPException(status_code = 404, detail = "Permiso de rol no encontrado o ya revocado")
+
+    record_audit_log(
+        request,
+        user_id = user["user_id"],
+        action = "ROLE_PERMISSION_REVOKE",
+        resource_id = file_id,
+        decision = "ALLOWED",
+        reason = f"Revoked from role {role_name}"
+    )
 
 
 # List Doctor/Researcher to grant direct permission
@@ -1191,6 +1438,14 @@ def delete_file(
     connection: Connection[Any] = Depends(get_db_connection),
 ) -> None:
     if user["role_name"] == "ADMIN" and (not reason or len(reason.strip()) < 10):
+        record_audit_log(
+            request,
+            user_id = user["user_id"],
+            action = "ADMIN_FILE_DELETE",
+            resource_id = file_id,
+            decision = "DENIED",
+            reason = "Not enough justification provided",
+        )
         raise HTTPException(
             status_code=400,
             detail="El administrador debe justificar la eliminacion del fichero con al menos 10 caracteres",
@@ -1245,6 +1500,14 @@ def delete_file(
             record["original_filename"],
             record["owner_id"],
             clean_reason,
+        )
+        record_audit_log(
+            request,
+            user_id = user["user_id"],
+            action = "ADMIN_FILE_DELETE",
+            resource_id = file_id,
+            decision = "ALLOWED",
+            reason = f"Moderation delete ({record['original_filename']}): {clean_reason}",
         )
 
 @app.get("/users/me/deletion-notices")
@@ -1443,7 +1706,7 @@ def list_patient_files_for_doctor(
         else:
             try:
                 # Check with OPA if current user has read access
-                authorize_file_access(request, user, "read", f["id"], connection)
+                authorize_file_access(request, user, "read", f["id"], connection, audit = False)
                 file_dict["has_access"] = True
             except HTTPException:
                 file_dict["has_access"] = False
@@ -1560,6 +1823,7 @@ def list_role_requests(
 
 @app.patch("/admin/role-requests/{request_id}")
 def resolve_role_request(
+    request: Request,
     request_id: uuid.UUID,
     body: ResolveRequestIn,
     user: dict[str, Any] = Depends(current_user),
@@ -1582,4 +1846,56 @@ def resolve_role_request(
             role_record = connection.execute("SELECT role_id FROM roles WHERE role_name = %s", (req['req_role'],)).fetchone()
             connection.execute("UPDATE users SET role_id = %s WHERE user_id = %s", (role_record['role_id'], req['user_id']))
 
+    record_audit_log(
+        request,
+        user_id = user["user_id"],
+        action = "ROLE_REQUEST_RESOLVE",
+        resource_id = req["user_id"],
+        decision = body.status,
+        reason = f"Requested role {req['req_role']}"
+    )
     return {"message": f"Solicitud {body.status.lower()}"}
+
+
+@app.get("/admin/audit-logs")
+def list_audit_logs(
+    limit: int = 100,
+    user: dict[str, Any] = Depends(current_user),
+    connection: Connection[Any] = Depends(get_db_connection),
+) -> list[dict[str, Any]]:
+    if user["role_name"] != "ADMIN":
+        raise HTTPException(status_code = 403, detail = "Se requieren privilegios de administrador")
+
+    safe_limit = max(1, min(limit, 500))
+    return connection.execute(
+        """
+        SELECT l.log_id, l.user_id, u.username, l.action, l.resource_id,
+               l.decision, l.reason, l.ip_address, l.timestamp,
+               l.prev_hash, l.current_hash
+        FROM access_logs AS l
+        LEFT JOIN users AS u ON u.user_id = l.user_id
+        ORDER BY l.log_id DESC
+        LIMIT %s
+        """,
+        (safe_limit,),
+    ).fetchall()
+
+
+@app.get("/admin/audit-logs/verify")
+def verify_audit_logs(
+    request: Request,
+    user: dict[str, Any] = Depends(current_user),
+    connection: Connection[Any] = Depends(get_db_connection),
+) -> dict[str, Any]:
+    if user["role_name"] != "ADMIN":
+        raise HTTPException(status_code = 403, detail = "Se requieren privilegios de administrador")
+
+    rows = connection.execute(
+        """
+        SELECT log_id, user_id, action, resource_id, decision,
+               reason, ip_address, timestamp, prev_hash, current_hash
+        FROM access_logs
+        ORDER BY log_id ASC
+        """
+    ).fetchall()
+    return verify_audit_chain(rows, request.app.state.audit_hmac_key)

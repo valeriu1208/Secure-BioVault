@@ -22,6 +22,10 @@ from main import (
     parse_opa_decision,
     public_jwk,
     verify_access_token,
+    AUDIT_GENESIS_HASH,
+    compute_log_hash,
+    derive_audit_hmac_key,
+    verify_audit_chain
 )
 
 
@@ -151,6 +155,81 @@ class OpaDecisionTests(unittest.TestCase):
         self.assertIs(parse_opa_decision({"result": {"allow": True}}), True)
         self.assertIsNone(parse_opa_decision({"result": "allow"}))
         self.assertIsNone(parse_opa_decision({"unexpected": True}))
+
+
+class AuditLogHashChainTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.hmac_key = derive_audit_hmac_key(secrets.token_bytes(32))
+
+    def _build_chain(self, hmac_key: bytes | None = None) -> list[dict]:
+        key = hmac_key or self.hmac_key
+        ts1 = datetime(2026, 11, 18, 12, 0, 0, 123456, tzinfo = timezone.utc)
+        ts2 = datetime(2026, 11, 18, 12, 1, 0, 654321, tzinfo = timezone.utc)
+        uid = uuid.uuid4()
+        fid = uuid.uuid4()
+
+        h1 = compute_log_hash(
+            hmac_key = key,
+            prev_hash = AUDIT_GENESIS_HASH,
+            user_id = uid,
+            action = "LOGIN_ATTEMPT",
+            resource_id = None,
+            decision = "ALLOWED",
+            reason = "Password and TOTP verified",
+            ip_address = "127.0.0.1",
+            timestamp = ts1,
+        )
+        h2 = compute_log_hash(
+            hmac_key = key,
+            prev_hash = h1,
+            user_id = uid,
+            action = "FILE_READ",
+            resource_id = fid,
+            decision = "DENIED",
+            reason = "OPA decision",
+            ip_address = "127.0.0.1",
+            timestamp = ts2,
+        )
+        return [
+            {
+                "log_id": 1, "user_id": uid, "action": "LOGIN_ATTEMPT",
+                "resource_id": None, "decision": "ALLOWED",
+                "reason": "Password and TOTP verified", "ip_address": "127.0.0.1",
+                "timestamp": ts1, "prev_hash": AUDIT_GENESIS_HASH, "current_hash": h1,
+            },
+            {
+                "log_id": 2, "user_id": uid, "action": "FILE_READ",
+                "resource_id": fid, "decision": "DENIED",
+                "reason": "OPA decision", "ip_address": "127.0.0.1",
+                "timestamp": ts2, "prev_hash": h1, "current_hash": h2,
+            },
+        ]
+
+    def test_valid_chain_passes_verification(self) -> None:
+        result = verify_audit_chain(self._build_chain(), self.hmac_key)
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["total_logs"], 2)
+        self.assertIsNone(result["broken_at_log_id"])
+
+    def test_tampered_row_is_detected(self) -> None:
+        rows = self._build_chain()
+        rows[1]["decision"] = "ALLOWED"
+        result = verify_audit_chain(rows, self.hmac_key)
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["broken_at_log_id"], 2)
+
+    def test_deleted_row_breaks_chain(self) -> None:
+        rows = self._build_chain()
+        del rows[0]
+        result = verify_audit_chain(rows, self.hmac_key)
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["broken_at_log_id"], 2)
+
+    def test_forged_chain_with_wrong_key_is_detected(self) -> None:
+        forged_rows = self._build_chain(hmac_key=secrets.token_bytes(32))
+        result = verify_audit_chain(forged_rows, self.hmac_key)
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["broken_at_log_id"], 1)
 
 
 if __name__ == "__main__":

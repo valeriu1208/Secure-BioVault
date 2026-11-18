@@ -132,8 +132,22 @@ CREATE TABLE access_logs (
     decision VARCHAR(20) NOT NULL,               -- 'ALLOWED' or 'DENIED'
     reason VARCHAR(255),
     ip_address VARCHAR(45),
-    timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    prev_hash CHAR(64) NOT NULL,
+    current_hash CHAR(64) NOT NULL
 );
+
+CREATE OR REPLACE FUNCTION prevent_access_logs_mutation()
+RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION 'access_logs is append-only: % operations are forbidden', TG_OP;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_access_logs_append_only
+BEFORE UPDATE OR DELETE ON access_logs
+FOR EACH ROW
+EXECUTE FUNCTION prevent_access_logs_mutation();
 
 -- Requests to change role
 CREATE TABLE IF NOT EXISTS role_requests (

@@ -77,6 +77,7 @@ services:
       - ./database/migrations/003_mfa_columns.sql:/migrations/003_mfa_columns.sql:ro
       - ./database/migrations/004_file_role_permissions.sql:/migrations/004_file_role_permissions.sql:ro
       - ./database/migrations/005_file_deletion_notices.sql:/migrations/005_file_deletion_notices.sql:ro
+      - ./database/migrations/006_tamper_proof_audit_logs.sql:/migrations/006_tamper_proof_audit_logs.sql:ro
     command:
       - psql
       - -v
@@ -91,6 +92,8 @@ services:
       - /migrations/004_file_role_permissions.sql
       - -f
       - /migrations/005_file_deletion_notices.sql
+      - -f
+      - /migrations/006_tamper_proof_audit_logs.sql
 
   db:
     image: postgres:16.4-alpine

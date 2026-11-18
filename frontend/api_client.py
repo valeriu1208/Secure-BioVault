@@ -233,3 +233,10 @@ def get_role_requests(session: Session) -> list[dict]:
 
 def resolve_role_request(session: Session, req_id: str, status: str) -> dict:
     return _request("PATCH", f"/admin/role-requests/{req_id}", session, json={"status": status}).json()
+
+def get_audit_logs(session: Session, limit: int = 100) -> list[dict]:
+    return _request("GET", "/admin/audit-logs", session, params = {"limit": limit}).json()
+
+
+def verify_audit_logs(session: Session) -> dict:
+    return _request("GET", "/admin/audit-logs/verify", session).json()
