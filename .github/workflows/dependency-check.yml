@@ -5,6 +5,9 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  schedule: # 02:00 UTC daily (catch newly disclosed CVEs in unchanged dependencies)
+    - cron: '0 2 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -93,6 +96,18 @@ jobs:
         with:
           sarif_file: 'trivy-fs-results.sarif'
           category: 'python-sca'
+
+      # Step 5b: Centralize findings in DefectDojo
+      - name: Upload Trivy Repo Report to DefectDojo
+        if: always()
+        env:
+          DEFECTDOJO_URL: ${{ secrets.DEFECTDOJO_URL }}
+          DEFECTDOJO_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
+        run: |
+          bash scripts/upload_to_defectdojo.sh \
+            "Trivy Scan" \
+            "trivy-fs-results.json" \
+            "Trivy Repo & Python SCA"
 
       # Step 6: Security Gate Enforcement (Fails pipeline on HIGH/CRITICAL after SARIF upload)
       - name: Evaluate Security Gate

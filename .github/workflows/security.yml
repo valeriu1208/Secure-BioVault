@@ -5,6 +5,9 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  schedule: # 02:30 UTC daily (catch new OS/base-image CVEs and updated SAST rules)
+    - cron: '30 2 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -60,7 +63,16 @@ jobs:
             --config p/security-audit \
             --config p/python \
             --config p/owasp-top-10 \
-            --sarif -o semgrep-results.sarif || true
+            --sarif-output=semgrep-results.sarif \
+            --json-output=semgrep-results.json || true
+
+      - name: Save Semgrep JSON Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: semgrep-sast-report
+          path: semgrep-results.json
+          retention-days: 7
 
       - name: Upload Semgrep SARIF to Security Tab
         uses: github/codeql-action/upload-sarif@v4
@@ -68,6 +80,21 @@ jobs:
         with:
           sarif_file: 'semgrep-results.sarif'
           category: 'semgrep-sast'
+
+      - name: Upload SAST Reports to DefectDojo
+        if: always()
+        env:
+          DEFECTDOJO_URL: ${{ secrets.DEFECTDOJO_URL }}
+          DEFECTDOJO_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
+        run: |
+          bash scripts/upload_to_defectdojo.sh \
+            "Bandit Scan" \
+            "bandit-results.json" \
+            "Bandit SAST"
+          bash scripts/upload_to_defectdojo.sh \
+            "Semgrep JSON Report" \
+            "semgrep-results.json" \
+            "Semgrep SAST"
 
   # ==========================================
   # JOB 2: Docker Container Image Scanning
@@ -163,3 +190,19 @@ jobs:
             trivy-backend-image.json
             trivy-frontend-image.json
           retention-days: 7
+
+      # --- Upload Container Scan Reports to DefectDojo
+      - name: Upload Container Scan Reports to DefectDojo
+        if: always()
+        env:
+          DEFECTDOJO_URL: ${{ secrets.DEFECTDOJO_URL }}
+          DEFECTDOJO_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
+        run: |
+          bash scripts/upload_to_defectdojo.sh \
+            "Trivy Scan" \
+            "trivy-backend-image.json" \
+            "Trivy Container - Backend"
+          bash scripts/upload_to_defectdojo.sh \
+            "Trivy Scan" \
+            "trivy-frontend-image.json" \
+            "Trivy Container - Frontend"
