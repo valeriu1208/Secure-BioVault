@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel
 
@@ -51,7 +51,11 @@ def register(body: RegisterIn):
 def token(form: OAuth2PasswordRequestForm = Depends()):
     user = USERS.get(form.username)
     if not user or user["password"] != form.password:
-        raise HTTPException(401, "Credenciales incorrectas")
+        # Same RFC 6749 error as the real backend
+        return JSONResponse(
+            {"error": "invalid_grant", "error_description": "Credenciales incorrectas"},
+            status_code=400,
+        )
     tok = secrets.token_hex(24)
     TOKENS[tok] = form.username
     return {"access_token": tok, "token_type": "bearer"}

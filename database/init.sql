@@ -9,6 +9,7 @@ DROP TABLE IF EXISTS consents CASCADE;
 DROP TABLE IF EXISTS files CASCADE;
 DROP TABLE IF EXISTS patient_profiles CASCADE;
 DROP TABLE IF EXISTS auth_sessions CASCADE;
+DROP TABLE IF EXISTS refresh_tokens CASCADE;
 DROP TABLE IF EXISTS credentials CASCADE;
 DROP TABLE IF EXISTS users CASCADE;
 DROP TABLE IF EXISTS roles CASCADE;
@@ -104,14 +105,15 @@ CREATE TABLE file_access_requests (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE auth_sessions (
+-- Opaque refresh tokens (hashed). Access tokens are stateless JWTs and are not stored.
+CREATE TABLE refresh_tokens (
     token_hash CHAR(64) PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
     expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX auth_sessions_user_id_idx ON auth_sessions(user_id);
+CREATE INDEX refresh_tokens_user_id_idx ON refresh_tokens(user_id);
 
 CREATE TABLE access_logs (
     log_id BIGSERIAL PRIMARY KEY,

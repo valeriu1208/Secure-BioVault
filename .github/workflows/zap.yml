@@ -25,6 +25,13 @@ jobs:
           rm -rf secrets/ .env
           make key
           chmod 644 secrets/jwt_*.pem
+          # Throwaway self-signed certificate for the Caddy HTTPS proxy
+          # (developers use mkcert locally; ZAP accepts untrusted certificates).
+          mkdir -p secrets/tls
+          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 1 \
+            -subj /CN=localhost -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" \
+            -keyout secrets/tls/key.pem -out secrets/tls/cert.pem
+          chmod 644 secrets/tls/*.pem
           
       # 2. Build and start stack
       - name: RUN DOCKER COMPOSE
@@ -34,8 +41,8 @@ jobs:
       # 3. Wait for backend service health check
       - name: Wait for App to be healthy
         run: |
-          echo "Waiting for backend service on port 8000..."
-          timeout 60 bash -c 'until curl -s -f http://localhost:8000/health; do sleep 2; done'
+          echo "Waiting for backend service on https://localhost:8443..."
+          timeout 60 bash -c 'until curl -k -s -f https://localhost:8443/health; do sleep 2; done'
           echo "App is ready for active scanning!"
 
       # 4. Authenticate seeded admin user (with mandatory TOTP MFA)
@@ -44,8 +51,9 @@ jobs:
           ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
         run: |
           # Request initial TOTP setup secret
-          RESPONSE=$(curl -s -X POST http://localhost:8000/auth/token \
+          RESPONSE=$(curl -k -s -X POST https://localhost:8443/auth/token \
             -H "Content-Type: application/x-www-form-urlencoded" \
+            -d "grant_type=password" \
             -d "username=admin" \
             -d "password=${ADMIN_PASSWORD}")
 
@@ -56,8 +64,9 @@ jobs:
             echo "::add-mask::$TOTP_SECRET"
             TOTP_CODE=$(TOTP_SECRET="$TOTP_SECRET" python3 -c 'import base64,hashlib,hmac,os,struct,time; k=base64.b32decode(os.environ["TOTP_SECRET"],casefold=True); h=hmac.new(k,struct.pack(">Q",int(time.time())//30),hashlib.sha1).digest(); o=h[-1]&15; c=(struct.unpack(">I",h[o:o+4])[0]&0x7fffffff)%1000000; print(f"{c:06d}")')
 
-            RESPONSE=$(curl -s -X POST http://localhost:8000/auth/token \
+            RESPONSE=$(curl -k -s -X POST https://localhost:8443/auth/token \
               -H "Content-Type: application/x-www-form-urlencoded" \
+              -d "grant_type=password" \
               -d "username=admin" \
               -d "password=${ADMIN_PASSWORD}" \
               -d "totp_code=${TOTP_CODE}")
@@ -85,7 +94,7 @@ jobs:
           echo "Starting Backend OpenAPI Scan..."
           docker run --net=host -v $(pwd):/zap/wrk/:rw \
             ghcr.io/zaproxy/zaproxy:stable zap-api-scan.py \
-            -t http://localhost:8000/openapi.json \
+            -t https://localhost:8443/openapi.json \
             -f openapi \
             -J backend_report.json \
             -r backend_report.html \
@@ -100,7 +109,7 @@ jobs:
           echo "Starting Streamlit Frontend Scan..."
           docker run --net=host -v $(pwd):/zap/wrk/:rw \
             ghcr.io/zaproxy/zaproxy:stable zap-full-scan.py \
-            -t http://localhost:8501 \
+            -t https://localhost \
             -j \
             -J frontend_report.json \
             -r frontend_report.html \
