@@ -78,14 +78,13 @@ def auth_page():
                     elif exc.status == 403 and code == "MFA_REQUIRED":
                         st.session_state["mfa_mode"] = "verify"
                         st.rerun()
-                    elif exc.status == 401 and mfa_mode in ("setup", "verify"):
+                    # OAuth 2.0: wrong password or TOTP -> 400 {"error": "invalid_grant"}
+                    elif exc.payload.get("error") == "invalid_grant" and mfa_mode in ("setup", "verify"):
                         st.error("Código MFA incorrecto o caducado.")
+                    elif exc.payload.get("error") == "invalid_grant":
+                        st.error("Credenciales incorrectas.")
                     else:
-                        st.error(
-                            "Credenciales incorrectas."
-                            if exc.status in (400, 401)
-                            else str(exc)
-                        )
+                        st.error(str(exc))
  
     with tab_register:
         with st.form("register_form"):

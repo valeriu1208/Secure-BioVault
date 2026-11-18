@@ -4,84 +4,198 @@ Secure BioVault uses FastAPI, Streamlit, and PostgreSQL.
 
 ## Run with Docker Compose
 
-On a fresh setup, run `make key` from the repository root to generate the
-database password, 32-byte file-encryption key, and Ed25519 signing key pair.
-It creates `.env` and the ignored `secrets/` directory and refuses to overwrite
-existing credentials. Keep backups of these values; changing the database
-password does not change the password in an existing database volume, and
-changing the encryption key prevents decrypting files encrypted with its
-previous value. Do not commit or share the private signing key.
+You need Docker (with Compose v2), `make`, `openssl`, Python 3 and
+[mkcert](https://github.com/FiloSottile/mkcert). All commands run from the
+repository root.
 
-Alternatively, create `.env` using the generated values below, then create the
-JWT key files:
+### 1. Generate secrets (once per machine)
 
 ```sh
-python3 -c "import base64, secrets; print('POSTGRES_PASSWORD=' + secrets.token_hex(24)); print('FILE_ENCRYPTION_KEY=' + base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"
-mkdir -p secrets
-openssl genpkey -algorithm Ed25519 -out secrets/jwt_private.pem
-openssl pkey -in secrets/jwt_private.pem -pubout -out secrets/jwt_public.pem
-chmod 600 secrets/jwt_private.pem
+make key
 ```
 
-```text
-POSTGRES_DB=biovault_db
-POSTGRES_USER=biovault_user
-POSTGRES_PASSWORD=paste-the-generated-password-here
-FILE_ENCRYPTION_KEY=paste-the-generated-key-here
+This creates `.env` (database name, user and password, `FILE_ENCRYPTION_KEY`,
+`FIELD_ENCRYPTION_KEY`) and the Ed25519 JWT signing keys in the git-ignored
+`secrets/` directory. It refuses to overwrite existing credentials.
+
+Back up `.env` and `secrets/`. Never re-run `make key` (or `make clean`) on a
+setup that already has data: the database volume keeps its original password,
+and files and emails encrypted with the old keys can no longer be decrypted.
+Do not commit or share the private signing key.
+
+### 2. Generate an HTTPS certificate (once per developer)
+
+The app is served over HTTPS by a Caddy reverse proxy. Each developer
+generates their own certificate with mkcert, which adds a local certificate
+authority to that machine's trust store so browsers show a valid padlock.
+Certificates are only trusted on the machine that created them, so do not
+share them. They are written to the git-ignored `secrets/tls/` directory.
+
+Install mkcert:
+
+- macOS: `brew install mkcert nss`
+- Windows: `choco install mkcert` or `scoop install mkcert`
+- Linux: mkcert and `libnss3-tools` from your package manager, or the mkcert
+  binary from its GitHub releases
+
+Then generate the certificate (`mkcert -install` may ask for your password):
+
+```sh
+make tls                       # macOS / Linux (same as scripts/gen-tls-cert.sh)
 ```
 
-Keep this key secret and back it up securely. Files cannot be decrypted if the
-key is lost. Then start the app:
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\gen-tls-cert.ps1   # Windows
+```
+
+Add extra hostnames or IPs as arguments, e.g. `scripts/gen-tls-cert.sh 192.168.1.20`.
+Pass `--force` (`-Force` on Windows) to replace an existing certificate.
+Restart your browser afterwards so it picks up the new certificate authority.
+
+### 3. Start the app
 
 ```sh
 docker compose up --build
 ```
 
-Open the frontend at <http://localhost:8501>. The API is at
-<http://localhost:8000>, with an OpenAPI page at <http://localhost:8000/docs>.
-The backend waits for PostgreSQL and applies the idempotent API schema migration
-before starting. Register an account in the UI, sign in, and upload PDFs.
+Startup order: `db` (PostgreSQL) becomes healthy, then `db-migrate` applies
+every migration in `database/migrations/`, then `backend`, `frontend` and the
+HTTPS `proxy` start. The migrations are idempotent, so they run safely on
+every start.
 
-Stop the services with `Ctrl+C`, or run `docker compose down` in another
-terminal. PostgreSQL data persists in the `postgres_api_data` volume. This
-separate volume leaves any older `postgres_data` volume untouched. Do not use
-`docker compose down -v` unless you intentionally want to delete the new
-database data.
+| URL | What it is |
+|---|---|
+| <https://localhost> | The web app (Streamlit) |
+| <https://localhost:8443/docs> | Interactive API documentation |
+| <https://localhost:8443> | The API itself (JSON only) |
 
-If `db-migrate` reports password authentication failure after changing
-`.env`, the database volume still has its original role password. To preserve
-the database, open a local `psql` session in the running database container:
+<http://localhost> redirects to HTTPS. The frontend and backend containers are
+not published on the host directly, so the old <http://localhost:8501> and
+<http://localhost:8000> addresses no longer work (Streamlit still prints 8501
+in its logs; that is the container-internal port).
+
+Register an account in the UI and sign in. The first login shows a QR code:
+scan it with an authenticator app (Google Authenticator, Authy, ...) and enter
+the 6-digit code. Every later login asks for a code.
+
+A default `admin` account is created on a fresh database. If you do not know
+its password, set a new one with `make fix_password` (it prints the SQL to run).
+
+Stop the services with `Ctrl+C`, or `docker compose down` in another terminal.
+Data persists in the `postgres_api_data` volume.
+
+### Updating an existing setup
+
+After pulling changes, always restart with a rebuild:
+
+```sh
+docker compose up --build
+```
+
+`database/init.sql` only runs when the database volume is **created for the
+first time**. Changes to it never reach an existing database. Every schema
+change must therefore also be added as a new idempotent file in
+`database/migrations/` (e.g. `ALTER TABLE ... ADD COLUMN IF NOT EXISTS ...`)
+and listed in the `db-migrate` service in `compose.yaml`. `db-migrate` then
+applies it on the next start.
+
+To apply migrations by hand without restarting everything:
+
+```sh
+docker compose run --rm db-migrate
+```
+
+The `NOTICE: ... already exists, skipping` lines in its output are normal.
+
+### Troubleshooting
+
+**`column ... does not exist` / `relation ... does not exist` (500 errors).**
+The database was created before that column or table was added, and the
+migration has not run. Run `docker compose run --rm db-migrate`. If it still
+fails, the schema change is missing a migration file: add one as described
+above.
+
+**`db-migrate` fails with `password authentication failed`.** `.env` was
+changed (or `make key` re-run) after the database volume was created; the
+volume still has the original password. Keep the data by setting the role
+password to the current `.env` value:
 
 ```sh
 docker compose exec db psql -U biovault_user -d biovault_db
 ```
 
-At the `psql` prompt, run `\password biovault_user` and enter the current
-`POSTGRES_PASSWORD` value from `.env` when prompted, then run `\q`. Retry the
-migration and startup:
+At the `psql` prompt run `\password biovault_user`, enter the current
+`POSTGRES_PASSWORD` from `.env`, then `\q`, and start again with
+`docker compose up --build`. If `make key` was re-run, also restore the old
+`FILE_ENCRYPTION_KEY` and `FIELD_ENCRYPTION_KEY` from your backup, or existing
+files and emails cannot be decrypted.
+
+**Login says `Credenciales incorrectas` for an account that exists.** The
+password is wrong, or the account was deactivated by an admin.
+
+**The browser warns that the certificate is not trusted.** Run `make tls`
+(or the Windows script) on that machine and restart the browser. On Firefox,
+install `nss` before running it.
+
+**`proxy` exits with `open /certs/cert.pem: no such file or directory`.** The
+certificate was not generated yet: see step 2.
+
+**Start from a completely empty database.** This deletes all users and files:
 
 ```sh
-docker compose run --rm db-migrate
-docker compose up --build -d
+docker compose down -v
+docker compose up --build
 ```
 
-Do not run `make key` to fix this error. If it has already been run on an
-existing setup, restore the previous `FILE_ENCRYPTION_KEY` from a backup before
-starting the backend, or previously encrypted files may no longer be readable.
+To inspect the database directly:
 
-Passwords are stored as Argon2id hashes. OAuth2 access tokens are signed using
-Ed25519 and validated by the API; their token IDs are hashed in PostgreSQL so
-the existing session-expiry checks remain in force. Uploaded PDFs use
+```sh
+docker compose exec db psql -U biovault_user -d biovault_db
+```
+
+## Security overview
+
+Passwords are stored as Argon2id hashes. Uploaded PDFs use
 AES-256-GCM envelope encryption: each file gets a random data-encryption key,
 which is wrapped by the 32-byte `FILE_ENCRYPTION_KEY`. Rego access decisions
 are evaluated by OPA. The initial policy allows owners and denies other users;
 OPA failures fail closed. Update `policies/biovault.rego` and, when a rule needs
 additional attributes, the OPA input in `backend/main.py` to add future rules.
-The Ed25519 public key is published at `/.well-known/jwks.json`.
-After upgrading, sign in again: previously issued opaque session tokens are
-not accepted as JWTs. The existing password-form token endpoint is retained
-for frontend compatibility; for public clients, use an authorization-code
-flow with PKCE or an external OAuth/OIDC provider.
+
+## Authentication: OAuth 2.0 / OpenID Connect tokens with asymmetric JWTs
+
+The first-party Streamlit frontend signs in at `POST /auth/token` with the
+OAuth 2.0 password grant (username, password and mandatory TOTP code).
+Errors follow RFC 6749: a wrong password, TOTP code or refresh token returns
+`400 {"error": "invalid_grant"}`; when a TOTP code is still needed the endpoint
+returns `403` with `error` `mfa_setup_required` (plus the QR provisioning URL)
+or `mfa_required`. Token responses are sent with `Cache-Control: no-store`.
+
+- **Access tokens** are Ed25519-signed JWTs (`alg: EdDSA`, `typ: at+jwt`) that
+  carry `sub`, `preferred_username` and `role`. They live 15 minutes and are
+  validated statelessly (signature, `iss`, `aud`, `exp`) with the public key
+  only: no database lookup per request. Any service can verify them with the
+  key published at `/.well-known/jwks.json`.
+- **ID tokens** (OpenID Connect) are returned at login: `aud` = the frontend
+  client, `auth_time`, `amr: ["pwd", "otp"]` and an optional `nonce`. They are
+  rejected as API bearer tokens.
+- **Refresh tokens** are opaque random values, stored only as SHA-256 hashes in
+  the `refresh_tokens` table (12 h lifetime). `grant_type=refresh_token` at
+  `/auth/token` rotates them (single use). This is the only point where the
+  user's active status and current role are re-read from the database.
+- **Revocation** (`POST /auth/revoke`, RFC 7009): logout and account
+  deactivation delete the refresh tokens, so an already-issued access token
+  remains valid for at most 15 minutes. This is the deliberate trade-off of
+  stateless validation.
+
+Discovery is published at `/.well-known/openid-configuration` and user claims
+at `/userinfo`. The issuer is `OIDC_ISSUER` (default `http://localhost:8000`; Docker Compose
+sets it to `https://localhost:8443`).
+Limitation: OpenID Connect itself defines browser-redirect flows (authorization
+code + PKCE); the password grant is used here because the frontend is a
+first-party client of the same system.
+
+After upgrading, sign in again: migration `002` drops the old sessions.
 
 ## Mock backend
 

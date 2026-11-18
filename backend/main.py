@@ -28,7 +28,7 @@ from cryptography.hazmat.primitives.serialization import (
 )
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response, JSONResponse
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.security import OAuth2PasswordBearer
 from psycopg import Connection, Error as PsycopgError
 from psycopg.errors import UniqueViolation
 from psycopg.rows import dict_row
@@ -40,8 +40,15 @@ logger = logging.getLogger(__name__)
 password_hash = PasswordHash.recommended()
 oauth2 = OAuth2PasswordBearer(tokenUrl="/auth/token")
 MAX_FILE_SIZE = 25 * 1024 * 1024
-SESSION_LIFETIME = timedelta(hours=12)
-JWT_ISSUER = "secure-biovault"
+# Access tokens are verified statelessly (signature + claims only), so they are
+# kept short-lived: revocation (logout, deactivation, role change) takes effect
+# at most ACCESS_TOKEN_LIFETIME later. Refresh tokens are opaque, stored hashed
+# in PostgreSQL and rotated on every use.
+ACCESS_TOKEN_LIFETIME = timedelta(minutes=15)
+REFRESH_TOKEN_LIFETIME = timedelta(hours=12)
+# OpenID Connect issuer: public base URL of this API (used in tokens and discovery).
+JWT_ISSUER = os.environ.get("OIDC_ISSUER", "http://localhost:8000").rstrip("/")
+OIDC_CLIENT_ID = "biovault-frontend"  # audience of ID tokens (first-party Streamlit client)
 JWT_AUDIENCE = "secure-biovault-api"
 JWT_KEY_ID = "ed25519-v1"
 OPA_DECISION_PATH = "/v1/data/biovault/authz/allow"
@@ -119,6 +126,16 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Secure BioVault API", lifespan=lifespan)
 
 
+@app.middleware("http")
+async def no_store_token_responses(request: Request, call_next: Any) -> Response:
+    """RFC 6749 section 5.1: token responses MUST NOT be cached (success or error)."""
+    response = await call_next(request)
+    if request.url.path == "/auth/token":
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+    return response
+
+
 class RegisterIn(BaseModel):
     username: str = Field(min_length=3, max_length=100)
     email: str = Field(min_length=3, max_length=255)
@@ -159,58 +176,127 @@ def get_db_connection(request: Request) -> Iterator[Connection[Any]]:
         yield connection
 
 
-def current_user(
-    request: Request,
-    token: str = Depends(oauth2),
-    connection: Connection[Any] = Depends(get_db_connection),
-) -> dict[str, Any]:
+VALID_ROLES = frozenset({"PATIENT", "DOCTOR", "RESEARCHER", "ADMIN"})
+
+
+def verify_access_token(token: str, public_key: Ed25519PublicKey) -> dict[str, Any]:
+    """Validate an access token using only the public key (no database lookup)."""
     try:
         claims = jwt.decode(
             token,
-            request.app.state.jwt_public_key,
+            public_key,
             algorithms=["EdDSA"],
             audience=JWT_AUDIENCE,
             issuer=JWT_ISSUER,
-            options={"require": ["aud", "exp", "iat", "iss", "jti", "sub"]},
+            options={
+                "require": ["aud", "exp", "iat", "iss", "jti", "sub", "role", "preferred_username"]
+            },
         )
+        if jwt.get_unverified_header(token).get("typ") != "at+jwt":
+            raise jwt.InvalidTokenError("Not an access token")
         user_id = uuid.UUID(claims["sub"])
-        token_hash = hashlib.sha256(claims["jti"].encode("utf-8")).hexdigest()
+        role = claims["role"]
+        username = claims["preferred_username"]
+        if role not in VALID_ROLES or not isinstance(username, str):
+            raise jwt.InvalidTokenError("Invalid role or username claim")
     except (jwt.InvalidTokenError, ValueError, KeyError, TypeError) as exc:
-        raise HTTPException(status_code=401, detail="Token inválido o caducado") from exc
-
-    user = connection.execute(
-        """
-        SELECT u.user_id, u.username, u.email, r.role_name
-        FROM auth_sessions AS s
-        JOIN users AS u ON u.user_id = s.user_id
-        JOIN roles AS r ON r.role_id = u.role_id
-        WHERE s.token_hash = %s
-          AND s.user_id = %s
-          AND s.expires_at > CURRENT_TIMESTAMP
-          AND u.is_active = TRUE
-        """,
-        (token_hash, user_id),
-    ).fetchone()
-    if user is None or user["user_id"] != user_id:
-        raise HTTPException(status_code=401, detail="Token inválido o caducado")
-    return user
+        raise HTTPException(
+            status_code=401,
+            detail="Token inválido o caducado",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from exc
+    return {"user_id": user_id, "username": username, "role_name": role}
 
 
-def issue_access_token(user_id: uuid.UUID, private_key: Ed25519PrivateKey) -> tuple[str, str]:
+def current_user(request: Request, token: str = Depends(oauth2)) -> dict[str, Any]:
+    return verify_access_token(token, request.app.state.jwt_public_key)
+
+
+def issue_access_token(
+    user_id: uuid.UUID,
+    username: str,
+    role: str,
+    private_key: Ed25519PrivateKey,
+) -> str:
     now = datetime.now(timezone.utc)
-    token_id = secrets.token_urlsafe(32)
     claims = {
         "sub": str(user_id),
-        "jti": token_id,
+        "preferred_username": username,
+        "role": role,
+        "jti": secrets.token_urlsafe(16),
         "iss": JWT_ISSUER,
         "aud": JWT_AUDIENCE,
         "iat": now,
-        "exp": now + SESSION_LIFETIME,
+        "exp": now + ACCESS_TOKEN_LIFETIME,
     }
-    return (
-        jwt.encode(claims, private_key, algorithm="EdDSA", headers={"kid": JWT_KEY_ID}),
-        token_id,
+    # typ=at+jwt (RFC 9068) distinguishes access tokens from any other JWT we sign.
+    return jwt.encode(
+        claims,
+        private_key,
+        algorithm="EdDSA",
+        headers={"kid": JWT_KEY_ID, "typ": "at+jwt"},
     )
+
+
+def issue_id_token(
+    user_id: uuid.UUID, username: str, private_key: Ed25519PrivateKey, nonce: str | None = None
+) -> str:
+    """OpenID Connect ID token: tells the client who authenticated and how."""
+    now = datetime.now(timezone.utc)
+    claims: dict[str, Any] = {
+        "iss": JWT_ISSUER,
+        "sub": str(user_id),
+        "aud": OIDC_CLIENT_ID,
+        "iat": now,
+        "exp": now + ACCESS_TOKEN_LIFETIME,
+        "auth_time": int(now.timestamp()),
+        "amr": ["pwd", "otp"],  # password + TOTP (RFC 8176)
+        "preferred_username": username,
+    }
+    if nonce:
+        claims["nonce"] = nonce
+    return jwt.encode(
+        claims, private_key, algorithm="EdDSA", headers={"kid": JWT_KEY_ID, "typ": "JWT"}
+    )
+
+
+def oauth_error(error: str, description: str) -> JSONResponse:
+    """RFC 6749 section 5.2 error response."""
+    return JSONResponse({"error": error, "error_description": description}, status_code=400)
+
+
+def hash_refresh_token(refresh_token: str) -> str:
+    return hashlib.sha256(refresh_token.encode("utf-8")).hexdigest()
+
+
+def issue_token_pair(
+    connection: Connection[Any],
+    user_id: uuid.UUID,
+    username: str,
+    role: str,
+    private_key: Ed25519PrivateKey,
+) -> dict[str, Any]:
+    """Create a stateless access token plus a stored, single-use refresh token."""
+    refresh_token = secrets.token_urlsafe(48)
+    connection.execute(
+        "INSERT INTO refresh_tokens (token_hash, user_id, expires_at) VALUES (%s, %s, %s)",
+        (
+            hash_refresh_token(refresh_token),
+            user_id,
+            datetime.now(timezone.utc) + REFRESH_TOKEN_LIFETIME,
+        ),
+    )
+    return {
+        "access_token": issue_access_token(user_id, username, role, private_key),
+        "token_type": "bearer",
+        "expires_in": int(ACCESS_TOKEN_LIFETIME.total_seconds()),
+        "refresh_token": refresh_token,
+        "refresh_expires_in": int(REFRESH_TOKEN_LIFETIME.total_seconds()),
+    }
+
+
+def revoke_refresh_tokens(connection: Connection[Any], user_id: uuid.UUID) -> None:
+    connection.execute("DELETE FROM refresh_tokens WHERE user_id = %s", (user_id,))
 
 
 def parse_opa_decision(decision: Any) -> bool | None:
@@ -394,6 +480,40 @@ def jwks(request: Request) -> dict[str, list[dict[str, str]]]:
     return {"keys": [public_jwk(request.app.state.jwt_public_key)]}
 
 
+@app.get("/.well-known/openid-configuration")
+def openid_configuration() -> dict[str, Any]:
+    return {
+        "issuer": JWT_ISSUER,
+        "token_endpoint": f"{JWT_ISSUER}/auth/token",
+        "userinfo_endpoint": f"{JWT_ISSUER}/userinfo",
+        "jwks_uri": f"{JWT_ISSUER}/.well-known/jwks.json",
+        "revocation_endpoint": f"{JWT_ISSUER}/auth/revoke",
+        "grant_types_supported": ["password", "refresh_token"],
+        "subject_types_supported": ["public"],
+        "id_token_signing_alg_values_supported": ["EdDSA"],
+        "claims_supported": ["sub", "iss", "aud", "exp", "iat", "auth_time", "amr",
+                             "nonce", "preferred_username", "email", "role"],
+    }
+
+
+@app.get("/userinfo")
+def userinfo(
+    request: Request,
+    user: dict[str, Any] = Depends(current_user),
+    connection: Connection[Any] = Depends(get_db_connection),
+) -> dict[str, Any]:
+    record = connection.execute(
+        "SELECT email FROM users WHERE user_id = %s", (user["user_id"],)
+    ).fetchone()
+    return {
+        "sub": str(user["user_id"]),
+        "preferred_username": user["username"],
+        "role": user["role_name"],
+        "email": decrypt_field(record["email"], request.app.state.field_encryption_key)
+        if record else None,
+    }
+
+
 @app.get("/health")
 def health_check(
     request: Request,
@@ -451,23 +571,37 @@ def register(
 @app.post("/auth/token")
 def token(
     request: Request,
-    form: OAuth2PasswordRequestForm = Depends(),
+    grant_type: str = Form(default="password"),
+    username: str | None = Form(default=None),
+    password: str | None = Form(default=None),
     totp_code: str | None = Form(default=None),
+    nonce: str | None = Form(default=None, max_length=512),
+    refresh_token: str | None = Form(default=None),
     connection: Connection[Any] = Depends(get_db_connection),
-) -> dict[str, Any]:
+) -> Any:
+    """OAuth 2.0 token endpoint: password grant (+ TOTP) or refresh_token grant."""
+    if grant_type == "refresh_token":
+        return refresh_grant(request, refresh_token, connection)
+    if grant_type != "password":
+        return oauth_error("unsupported_grant_type", "Use password or refresh_token")
+    if not username or not password:
+        return oauth_error("invalid_request", "username and password are required")
+
     with connection.transaction():
         user = connection.execute(
             """
-            SELECT u.user_id, u.email, c.password_hash, c.mfa_enabled, c.totp_secret
+            SELECT u.user_id, u.username, u.email, r.role_name,
+                   c.password_hash, c.mfa_enabled, c.totp_secret
             FROM users AS u
             JOIN credentials AS c ON c.user_id = u.user_id
+            JOIN roles AS r ON r.role_id = u.role_id
             WHERE u.username = %s AND u.is_active = TRUE
             """,
-            (form.username,),
+            (username,),
         ).fetchone()
 
-        if user is None or not password_hash.verify(form.password, user["password_hash"]):
-            raise HTTPException(status_code=401, detail="Credenciales incorrectas")
+        if user is None or not password_hash.verify(password, user["password_hash"]):
+            return oauth_error("invalid_grant", "Credenciales incorrectas")
 
         key = request.app.state.field_encryption_key
 
@@ -492,6 +626,8 @@ def token(
                 return JSONResponse(
                     status_code=403,
                     content={
+                        "error": "mfa_setup_required",
+                        "error_description": "Scan the QR code and send totp_code",
                         "code": "MFA_SETUP_REQUIRED",
                         "otpauth_url": otpauth_url,
                         "secret": secret,
@@ -500,7 +636,7 @@ def token(
 
             # QR scanned, send 6 digit code, verify and activate MFA
             if not pyotp.TOTP(secret).verify(totp_code.strip(), valid_window=1):
-                raise HTTPException(status_code=401, detail="Código de verificación inválido")
+                return oauth_error("invalid_grant", "Código de verificación inválido")
 
             connection.execute(
                 "UPDATE credentials SET mfa_enabled = TRUE WHERE user_id = %s",
@@ -510,33 +646,88 @@ def token(
         # MFA already enabled
         else:
             if not totp_code:
-                return JSONResponse(status_code=403, content={"code": "MFA_REQUIRED"})
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "error": "mfa_required",
+                        "error_description": "Send totp_code from the authenticator app",
+                        "code": "MFA_REQUIRED",
+                    },
+                )
 
             secret = decrypt_field(user["totp_secret"], key)
             if not pyotp.TOTP(secret).verify(totp_code.strip(), valid_window=1):
-                raise HTTPException(status_code=401, detail="Código de verificación incorrecto o caducado")
+                return oauth_error("invalid_grant", "Código de verificación incorrecto o caducado")
 
         
-        access_token, token_id = issue_access_token(
-            user["user_id"], request.app.state.jwt_private_key
+        tokens = issue_token_pair(
+            connection,
+            user["user_id"],
+            user["username"],
+            user["role_name"],
+            request.app.state.jwt_private_key,
         )
-        token_hash = hashlib.sha256(token_id.encode("utf-8")).hexdigest()
-        expires_at = datetime.now(timezone.utc) + SESSION_LIFETIME
-        connection.execute(
-            "INSERT INTO auth_sessions (token_hash, user_id, expires_at) VALUES (%s, %s, %s)",
-            (token_hash, user["user_id"], expires_at),
+    tokens["id_token"] = issue_id_token(
+        user["user_id"], user["username"], request.app.state.jwt_private_key, nonce
+    )
+    return tokens
+
+
+def refresh_grant(
+    request: Request, refresh_token: str | None, connection: Connection[Any]
+) -> Any:
+    """Exchange a refresh token for a new token pair (refresh-token rotation).
+
+    This is the only point where session state is checked against the
+    database: the user must still be active, and the current role is read
+    fresh so role changes reach the next access token.
+    """
+    with connection.transaction():
+        # Single use: the old refresh token is consumed whether or not it is valid.
+        row = connection.execute(
+            """
+            DELETE FROM refresh_tokens
+            WHERE token_hash = %s
+            RETURNING user_id, expires_at
+            """,
+            (hash_refresh_token(refresh_token or ""),),
+        ).fetchone()
+        if row is None or row["expires_at"] <= datetime.now(timezone.utc):
+            return oauth_error("invalid_grant", "Invalid or expired refresh token")
+
+        user = connection.execute(
+            """
+            SELECT u.user_id, u.username, r.role_name
+            FROM users AS u
+            JOIN roles AS r ON r.role_id = u.role_id
+            WHERE u.user_id = %s AND u.is_active = TRUE
+            """,
+            (row["user_id"],),
+        ).fetchone()
+        if user is None:
+            return oauth_error("invalid_grant", "User is not active")
+
+        return issue_token_pair(
+            connection,
+            user["user_id"],
+            user["username"],
+            user["role_name"],
+            request.app.state.jwt_private_key,
         )
-    
-    return {
-        "access_token": access_token,
-        "token_type": "bearer",
-        "expires_in": int(SESSION_LIFETIME.total_seconds()),
-    }
 
 
 @app.get("/users/me")
-def me(request: Request, user: dict[str, Any] = Depends(current_user)) -> dict[str, str]:
-    dec_email = decrypt_field(user["email"], request.app.state.field_encryption_key)
+def me(
+    request: Request,
+    user: dict[str, Any] = Depends(current_user),
+    connection: Connection[Any] = Depends(get_db_connection),
+) -> dict[str, str]:
+    record = connection.execute(
+        "SELECT email FROM users WHERE user_id = %s", (user["user_id"],)
+    ).fetchone()
+    if record is None:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    dec_email = decrypt_field(record["email"], request.app.state.field_encryption_key)
     return {"username": user["username"], "email": dec_email, "role": user["role_name"]}
 
 
@@ -880,29 +1071,21 @@ def delete_file(
         raise HTTPException(status_code=404, detail="Documento no encontrado")
 
 
-@app.post("/auth/logout", status_code=204)
-def logout(
-    request: Request,
-    token: str = Depends(oauth2),
+@app.post("/auth/revoke")
+def revoke(
+    token: str = Form(...),
+    token_type_hint: str | None = Form(default=None),
     connection: Connection[Any] = Depends(get_db_connection),
-) -> None:
-    try:
-        claims = jwt.decode(
-            token,
-            request.app.state.jwt_public_key,
-            algorithms=["EdDSA"],
-            audience=JWT_AUDIENCE,
-            issuer=JWT_ISSUER,
-            options={"verify_exp": False, "require": ["jti"]}
-        )
-        token_hash = hashlib.sha256(claims["jti"].encode("utf-8")).hexdigest()
-        
-        connection.execute(
-            "DELETE FROM auth_sessions WHERE token_hash = %s", 
-            (token_hash,)
-        )
-    except jwt.InvalidTokenError:
-        pass
+) -> Response:
+    """RFC 7009 token revocation (logout): deletes the refresh token.
+
+    Access tokens are stateless and simply expire within ACCESS_TOKEN_LIFETIME;
+    per RFC 7009 the response is 200 in every case.
+    """
+    connection.execute(
+        "DELETE FROM refresh_tokens WHERE token_hash = %s", (hash_refresh_token(token),)
+    )
+    return Response(status_code=200)
 
 
 @app.get("/admin/users")
@@ -1048,7 +1231,7 @@ def delete_user(
         raise HTTPException(status_code=401, detail="Contraseña incorrecta")
     with connection.transaction():
         connection.execute("UPDATE users SET is_active = FALSE WHERE user_id = %s", (user_id,))
-        connection.execute("DELETE FROM auth_sessions WHERE user_id = %s", (user_id,))
+        revoke_refresh_tokens(connection, user_id)
     return {"message": "Usuario desactivado correctamente"}
 
 
@@ -1066,7 +1249,7 @@ def delete_user_by_admin(
         if not target:
             raise HTTPException(status_code=404, detail="Usuario no encontrado")
         connection.execute("UPDATE users SET is_active = FALSE WHERE user_id = %s", (target_user_id,))
-        connection.execute("DELETE FROM auth_sessions WHERE user_id = %s", (target_user_id,))
+        revoke_refresh_tokens(connection, target_user_id)
 
     return {"message": "Usuario desactivado correctamente por el administrador"}
 
@@ -1087,7 +1270,7 @@ def update_user_active_status(
             raise HTTPException(status_code=404, detail="Usuario no encontrado")
         connection.execute("UPDATE users SET is_active = %s WHERE user_id = %s", (body.is_active, target_user_id))
         if not body.is_active:
-            connection.execute("DELETE FROM auth_sessions WHERE user_id = %s", (target_user_id,))
+            revoke_refresh_tokens(connection, target_user_id)
 
     return {"message": "Estado de cuenta actualizado correctamente por el administrador"}
 

@@ -21,7 +21,7 @@ The database design incorporates privacy, security, and access control features 
 4. **`consents`**: Stores patient-level consent attributes used by authorization rules.
 5. **`files`**: Stores file metadata, AES-GCM ciphertext, wrapped per-file data keys, and nonces.
 6. **`file_permissions`** and **`file_access_requests`**: Store per-file grants and pending access requests.
-7. **`auth_sessions`**: Stores hashes of JWT IDs and their expiration times.
+7. **`refresh_tokens`**: Stores SHA-256 hashes of opaque refresh tokens and their expiration times. Access tokens are stateless JWTs and are not stored.
 8. **`access_logs`**: Schema for access decisions and audit events.
 
 ### Database Commands (`Makefile`)

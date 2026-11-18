@@ -1,0 +1,22 @@
+# HTTPS reverse proxy. Certificates come from scripts/gen-tls-cert.{sh,ps1}
+# (mkcert), mounted at /certs. Caddy never requests public certificates here.
+{
+	auto_https disable_redirects
+}
+
+# Plain http://localhost -> https://localhost
+http://:80 {
+	redir https://{host}{uri} permanent
+}
+
+# Streamlit frontend
+https://:443 {
+	tls /certs/cert.pem /certs/key.pem
+	reverse_proxy frontend:8501
+}
+
+# FastAPI backend (API + /docs)
+https://:8443 {
+	tls /certs/cert.pem /certs/key.pem
+	reverse_proxy backend:8000
+}

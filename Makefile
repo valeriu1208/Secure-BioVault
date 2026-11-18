@@ -12,6 +12,9 @@ key:
 	openssl pkey -in secrets/jwt_private.pem -pubout -out secrets/jwt_public.pem
 	chmod 600 secrets/jwt_private.pem
 
+tls:
+	./scripts/gen-tls-cert.sh
+
 clean:
 	rm -f .env
 	rm -rf ./secrets

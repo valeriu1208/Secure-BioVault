@@ -24,9 +24,14 @@ class ApiError(Exception):
 
 @dataclass
 class Session:
-    """Token JWT de la sesión actual."""
+    """Tokens de la sesión actual.
+
+    access_token: JWT firmado (Ed25519) de vida corta; el backend lo valida sin BD.
+    refresh_token: token opaco de un solo uso para obtener un nuevo par de tokens.
+    """
 
     access_token: str
+    refresh_token: str | None = None
 
     @property
     def headers(self) -> dict:
@@ -34,7 +39,32 @@ class Session:
 
 
 def _request(method: str, path: str, session: Session | None = None, **kwargs):
-    headers = kwargs.pop("headers", {})
+    try:
+        return _send(method, path, session, **kwargs)
+    except ApiError as exc:
+        # Access token caducado: rotamos con el refresh token y reintentamos una vez.
+        if exc.status != 401 or session is None or not session.refresh_token:
+            raise
+        try:
+            _refresh(session)
+        except ApiError:
+            raise exc from None  # refresh rechazado: la sesión ha caducado (401)
+        return _send(method, path, session, **kwargs)
+
+
+def _refresh(session: Session) -> None:
+    """Obtiene un nuevo par de tokens y actualiza la sesión in situ."""
+    refresh_token, session.refresh_token = session.refresh_token, None
+    resp = _send(
+        "POST", "/auth/token", data={"grant_type": "refresh_token", "refresh_token": refresh_token}
+    )
+    body = resp.json()
+    session.access_token = body["access_token"]
+    session.refresh_token = body.get("refresh_token")
+
+
+def _send(method: str, path: str, session: Session | None = None, **kwargs):
+    headers = dict(kwargs.pop("headers", {}))
     if session:
         headers.update(session.headers)
     try:
@@ -55,7 +85,14 @@ def _request(method: str, path: str, session: Session | None = None, **kwargs):
             body = resp.json()
             if isinstance(body, dict):
                 payload = body["detail"] if isinstance(body.get("detail"), dict) else body
-                detail = payload.get("message") or payload.get("detail") or payload.get("code") or resp.text
+                # OAuth 2.0 errors (RFC 6749 §5.2) use error / error_description.
+                detail = (
+                    payload.get("message")
+                    or payload.get("detail")
+                    or payload.get("error_description")
+                    or payload.get("code")
+                    or resp.text
+                )
             else:
                 detail = str(body)
         except ValueError:
@@ -76,15 +113,19 @@ def register(username: str, email: str, password: str) -> dict:
 
 def login(username: str, password: str, totp_code: str | None = None) -> Session:
     # OAuth2 Password flow: el formulario va en x-www-form-urlencoded
-    form_data = {"username": username, "password": password}
+    form_data = {"grant_type": "password", "username": username, "password": password}
     if totp_code:
         form_data["totp_code"] = totp_code.strip()
 
     resp = _request("POST", "/auth/token", data=form_data)
-    return Session(access_token=resp.json()["access_token"])
+    body = resp.json()
+    return Session(access_token=body["access_token"], refresh_token=body.get("refresh_token"))
 
 def logout(session: Session) -> None:
-    return _request("POST", "/auth/logout", session)
+    # RFC 7009: revoca el refresh token; el access token caduca solo (vida corta).
+    if session.refresh_token:
+        _send("POST", "/auth/revoke", data={"token": session.refresh_token, "token_type_hint": "refresh_token"})
+    session.refresh_token = None
 
 def me(session: Session) -> dict:
     return _request("GET", "/users/me", session).json()

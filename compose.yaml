@@ -9,8 +9,8 @@ services:
       JWT_PRIVATE_KEY_PATH: /run/secrets/jwt_private.pem
       JWT_PUBLIC_KEY_PATH: /run/secrets/jwt_public.pem
       OPA_URL: http://opa:8181
-    ports:
-      - "8000:8000"
+      OIDC_ISSUER: https://localhost:8443
+    # Not published on the host: reach it over HTTPS via the proxy (port 8443).
     volumes:
       - ./secrets/jwt_private.pem:/run/secrets/jwt_private.pem:ro
       - ./secrets/jwt_public.pem:/run/secrets/jwt_public.pem:ro
@@ -41,9 +41,23 @@ services:
       context: ./frontend
     environment:
       BACKEND_URL: http://backend:8000
-    ports:
-      - "8501:8501"
+    # Not published on the host: reach it over HTTPS via the proxy (port 443).
     depends_on:
+      backend:
+        condition: service_healthy
+
+  proxy:
+    image: caddy:2.8.4-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8443:8443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./secrets/tls:/certs:ro
+    depends_on:
+      frontend:
+        condition: service_started
       backend:
         condition: service_healthy
 
@@ -59,7 +73,18 @@ services:
       PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     volumes:
       - ./database/migrations/001_persistent_api.sql:/migrations/001_persistent_api.sql:ro
-    command: ["psql", "-v", "ON_ERROR_STOP=1", "-f", "/migrations/001_persistent_api.sql"]
+      - ./database/migrations/002_stateless_access_tokens.sql:/migrations/002_stateless_access_tokens.sql:ro
+      - ./database/migrations/003_mfa_columns.sql:/migrations/003_mfa_columns.sql:ro
+    command:
+      - psql
+      - -v
+      - ON_ERROR_STOP=1
+      - -f
+      - /migrations/001_persistent_api.sql
+      - -f
+      - /migrations/002_stateless_access_tokens.sql
+      - -f
+      - /migrations/003_mfa_columns.sql
 
   db:
     image: postgres:16.4-alpine
