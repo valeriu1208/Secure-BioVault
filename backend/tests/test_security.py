@@ -10,24 +10,23 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from fastapi import HTTPException
 
-from main import (
-    JWT_AUDIENCE,
-    JWT_ISSUER,
-    JWT_KEY_ID,
+from audit import (
+    AUDIT_GENESIS_HASH,
+    compute_log_hash,
+    derive_audit_hmac_key,
+    verify_audit_chain,
+)
+from config import JWT_AUDIENCE, JWT_ISSUER, JWT_KEY_ID
+from opa import parse_opa_decision
+from security import (
     decrypt_file,
     encrypt_file,
     issue_access_token,
     issue_id_token,
     password_hash,
-    parse_opa_decision,
     public_jwk,
     verify_access_token,
-    AUDIT_GENESIS_HASH,
-    compute_log_hash,
-    derive_audit_hmac_key,
-    verify_audit_chain
 )
-
 
 class PasswordHashTests(unittest.TestCase):
     def test_passwords_are_hashed_with_argon2id(self) -> None:
